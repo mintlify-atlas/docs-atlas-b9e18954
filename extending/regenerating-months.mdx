@@ -1,0 +1,110 @@
+---
+title: "Regenerate Month Folders After Strategy Changes"
+sidebarTitle: "Regenerating Months"
+description: "How to edit the reference month, rebuild the universe from Binance data, resolve Yahoo tickers, verify prices, and stamp all month folders in one pipeline."
+---
+
+The generated month folders under `content/` are build artefacts — they are stamped by `generate_months.mjs` from a single reference month and must never be edited by hand. All strategy logic lives in `content/sep_2020/`, and every change there flows out to all months through the pipeline described below.
+
+<Note>
+  All approximations made during this process are also documented in `docs/HOWTO.md` in the source repository.
+</Note>
+
+## The core principle
+
+`content/sep_2020/` is the only folder edited by hand. The generator substitutes exactly three things into every other month folder:
+
+- The `// BASKET:BEGIN … // BASKET:END` block in `main.strategy.ts`
+- The `TICKER_OVERRIDES` block in `modules/backtest.module.ts`
+- The frame (`frameName`, `startDate`, `endDate`, `note`) in `modules/backtest.module.ts`
+
+Everything in `classes/` — including `YahooFinance.ts` and any other files — is copied into each month unchanged.
+
+## The regeneration pipeline
+
+<Steps>
+
+### Edit the reference month
+
+Make all changes inside `content/sep_2020/`:
+
+- **Strategy logic** (gate windows, allocation formula, holding period, stop/take-profit levels): edit `content/sep_2020/main.strategy.ts`
+- **Exchange adapter, sampling, or frame**: edit `content/sep_2020/modules/backtest.module.ts`
+- **Data source**: edit `content/sep_2020/classes/YahooFinance.ts`
+
+Do not touch any other month folder. The generator will propagate your changes when you reach step 5.
+
+### Rebuild the universe
+
+If you are extending the date range or adding months, rebuild `scripts/common/universe.json` from Binance monthly volume data:
+
+```bash
+node scripts/common/build_universe.mjs --top 20 --from 2020-09 --to 2026-09
+```
+
+The script downloads monthly candles for all Binance USDT spot pairs (cached in `tmp/binance_monthly_usdt.json`; pass `--refresh` to re-fetch) and ranks them by previous-month quote volume. It writes the ranked baskets to `scripts/common/universe.json`.
+
+Filters applied automatically: stablecoins and fiat bases, leveraged tokens (`UP`/`DOWN`/`BULL`/`BEAR` suffixes), and wrapped or staked derivatives of BTC, ETH, and SOL are excluded. Only pairs listed at least 90 days before the target month qualify. Coins marked `null` in `yahoo_tickers.json`, or whose Yahoo history starts later than 7 days before the month, are also excluded — their slots are filled by the next-ranked pair, which may itself be unresolved.
+
+**Exit code 2** means unchecked coins remain in one or more baskets. Proceed to step 3.
+
+### Resolve Yahoo tickers
+
+```bash
+node scripts/common/resolve_yahoo_tickers.mjs
+```
+
+The resolver maps each Binance symbol (`BASEUSDT`) to its Yahoo Finance ticker. The default mapping is `BASE-USD`; for tokens where that ticker belongs to a different asset, the resolver searches Yahoo by ticker and by project name and picks the candidate with the longest history. Explicit overrides for known renames and rebrands (e.g. `RNDRUSDT → RENDER-USD`, `MATICUSDT → WMATIC-USD`) are hard-coded. Symbols with no Yahoo listing are written as `null`.
+
+Results are saved to `scripts/common/yahoo_tickers.json`. Already-resolved symbols are skipped unless you pass `--refresh` or `--refresh-missing`.
+
+<Note>
+  Run steps 2 and 3 in a loop — typically 2–3 iterations — until `build_universe.mjs` exits with code 0. Each resolver pass resolves newly promoted coins, which may in turn expose further replacements when the universe is rebuilt.
+</Note>
+
+### Verify prices
+
+```bash
+node scripts/common/verify_yahoo_tickers.mjs
+```
+
+The verifier compares Yahoo Finance closing prices against Binance monthly closes at both edges of every basket month (the close of the preceding month and the close of the basket month itself). This catches:
+
+- Ticker collisions where `BASE-USD` belongs to a different token (historical cases: `APE-USD`, `ARB-USD`, `TON-USD`)
+- Pieces of foreign history spliced into a series (e.g. `OP-USD` before October 2022)
+- Gaps caused by token migrations, where Binance is trading but Yahoo has no price (e.g. DYDX in November 2023)
+- Prices below `1e-5` USD, where Yahoo's 7-significant-digit storage gives a price step larger than 1%
+
+The threshold for a bad month is a deviation of more than 15% at either edge. If bad months represent more than half of the compared months for a given ticker, the ticker is set to `null` in `yahoo_tickers.json` and the rejection reason is written to `yahoo_tickers_rejected.json`. Individual bad months are recorded in the `badMonths` field of the ticker entry; `build_universe.mjs` excludes the coin from those months.
+
+If any tickers are newly rejected, return to step 2 and repeat the build/resolve cycle until the verifier reports no new rejections.
+
+### Generate month folders
+
+```bash
+node scripts/common/generate_months.mjs --source content/sep_2020
+```
+
+The generator reads every month from `universe.json`, copies the reference folder into `content/<mon>_<yyyy>/`, and substitutes the basket block, ticker overrides, and frame. It also rewrites the runner scripts:
+
+- `scripts/linux/generate_strategy.sh`
+- `scripts/win/generate_strategy.bat`
+
+Both runners are regenerated to list every month currently on disk.
+
+</Steps>
+
+<Warning>
+  The generator refuses to stamp any month that contains unresolved Yahoo tickers. Steps 2 and 3 must converge to zero unchecked symbols before `generate_months.mjs` will complete successfully. An unresolved ticker in a basket causes the entire month's run to fail on its first tick.
+</Warning>
+
+## What changes per month vs. what is copied unchanged
+
+| File | What happens |
+|---|---|
+| `main.strategy.ts` | Basket block (`// BASKET:BEGIN … // BASKET:END`) is replaced with that month's top-ranked coins |
+| `modules/backtest.module.ts` | `TICKER_OVERRIDES` block and frame fields (`frameName`, `startDate`, `endDate`, `note`) are substituted |
+| `classes/YahooFinance.ts` | Copied unchanged from the reference month |
+| Any other file in `classes/` | Copied unchanged from the reference month |
+
+The strategy constants — deposit, gate windows, holding period, stop/take-profit levels — are identical across all months because they come from an unmodified copy of `main.strategy.ts`. Only the basket and the frame are month-specific.

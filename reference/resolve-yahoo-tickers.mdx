@@ -1,0 +1,73 @@
+---
+title: "resolve_yahoo_tickers.mjs — Map Binance to Yahoo Tickers"
+sidebarTitle: "resolve_yahoo_tickers"
+description: "Reference for resolve_yahoo_tickers.mjs: maps Binance USDT symbols to Yahoo Finance tickers using direct lookup and search, writes yahoo_tickers.json."
+---
+
+`resolve_yahoo_tickers.mjs` finds the correct Yahoo Finance ticker for every coin that appears in any basket in `universe.json`. It handles renamed tokens, ambiguous names, coins that share a name with a different asset on Yahoo, and coins that are not listed on Yahoo at all. Results are written to `scripts/common/yahoo_tickers.json` and consumed by both `build_universe.mjs` and `generate_months.mjs`.
+
+## Usage
+
+```bash
+node scripts/common/resolve_yahoo_tickers.mjs [--refresh] [--refresh-missing]
+```
+
+## Flags
+
+<ParamField path="--refresh" type="boolean">
+  Re-resolve every symbol from scratch, ignoring any existing entries in `yahoo_tickers.json`. Use this after a `RENAMED` override has been added or when you suspect stale data.
+</ParamField>
+
+<ParamField path="--refresh-missing" type="boolean">
+  Re-resolve only symbols that are currently set to `null` in `yahoo_tickers.json`. Useful after a coin is later listed on Yahoo or after correcting a `RENAMED` override for a previously unresolvable coin.
+</ParamField>
+
+If neither flag is passed, the script skips any symbol that already has an entry in the output file (whether `null` or a ticker object), making incremental runs fast.
+
+## Output
+
+`scripts/common/yahoo_tickers.json` — an object mapping each Binance symbol (e.g. `UNIUSDT`) to one of:
+
+- `{ "ticker": "UNI7083-USD", "since": "2020-09-17" }` — resolved ticker and the date of its earliest daily bar on Yahoo.
+- `null` — the coin is not on Yahoo Finance, or it has been intentionally excluded (see RENAMED overrides below). Coins with a `null` entry are excluded from all baskets by `build_universe.mjs`.
+
+After `verify_yahoo_tickers.mjs` runs, entries may also gain a `badMonths` array listing individual months where Yahoo prices diverge from Binance.
+
+## Resolution Logic
+
+For each symbol the script attempts resolution in this order:
+
+1. **RENAMED overrides** — a hard-coded map is checked first. If the symbol has an entry, that ticker (or `null`) is used directly without any Yahoo lookup.
+2. **Direct `BASE-USD` lookup** — the script fetches the Yahoo chart API for the plain `BASE-USD` ticker. If the series exists and has at least one bar, this ticker is returned immediately.
+3. **Search fallback** — if the direct lookup fails, Yahoo's search endpoint is queried using the base symbol, the `BASE-USD` string, the `BASE USD` phrase, and (when available) the project's common name from an internal `NAMES` map. All results matching the pattern `BASE\d*-[A-Z]+` are collected as candidates and converted to `-USD` form.
+4. **Oldest history wins** — when multiple candidates are found (e.g. two tokens that share the same ticker base with numeric suffixes), the one with the earliest first bar is selected. This identifies the original token rather than a later reissue.
+
+## Hard-coded RENAMED Overrides
+
+The following symbols have entries in the `RENAMED` map and bypass the automatic resolution logic entirely:
+
+| Binance Symbol | Yahoo Ticker | Reason |
+|---|---|---|
+| `RNDRUSDT` | `RENDER-USD` | Render Network rebranded from RNDR to RENDER in 2024 |
+| `MATICUSDT` | `WMATIC-USD` | MATIC-USD was delisted after the POL migration; Wrapped MATIC tracks the price from March 2021 |
+| `FTMUSDT` | `WFTM-USD` | FTM-USD was delisted after the Sonic rebrand; Wrapped FTM tracks the price from June 2021 |
+| `SUSDT` | `S32684-USD` | Single-character ticker is not findable via search |
+| `COMPUSDT` | `COMP5692-USD` | The plain `COMP-USD` ticker on Yahoo returns only equity data |
+| `PUMPUSDT` | `PUMP36507-USD` | An older PUMP token from 2024 exists on Yahoo; the Binance listing is a different asset |
+| `TRUMPUSDT` | `TRUMP35336-USD` | An older MAGA-named TRUMP token from 2023 exists on Yahoo; the Binance listing is the January 2025 Official Trump token |
+| `LUNAUSDT` | `null` | The Binance symbol refers to Terra Classic before May 2022 and Terra 2.0 after — two different assets under one ticker |
+| `NEIROUSDT` | `null` | Multiple unrelated meme tokens with this name launched in 2024; the correct Binance listing cannot be determined reliably |
+
+## Rate Limiting
+
+The script pauses for **1500 ms** between every HTTP request to Yahoo Finance. On `429 Too Many Requests` responses it applies exponential backoff starting at 5 seconds, doubling on each retry up to a maximum of 60 seconds, with up to 6 attempts before throwing. Requests are alternated between the `query1.finance.yahoo.com` and `query2.finance.yahoo.com` hosts to reduce per-host load.
+
+<Note>
+  Run this script after `build_universe.mjs` whenever new coins appear in baskets. Because `build_universe.mjs` exits with code 2 when unresolved symbols exist, the standard workflow is to alternate between the two scripts until `build_universe.mjs` exits cleanly:
+
+  ```bash
+  node scripts/common/resolve_yahoo_tickers.mjs
+  node scripts/common/build_universe.mjs
+  # repeat until build_universe exits with code 0
+  ```
+</Note>

@@ -1,0 +1,279 @@
+---
+title: "main.strategy.ts — Fund Logic and Signal Generation"
+sidebarTitle: "main.strategy.ts"
+description: "API reference for main.strategy.ts: constants, gate cache, addStrategySchema getSignal, Position.bracket, listenDoneBacktest, and addLauncherSchema."
+---
+
+`main.strategy.ts` is the only file that changes between months — the `BASKET` block between the `// BASKET:BEGIN` and `// BASKET:END` markers is the single thing the generator substitutes when stamping a new month folder. Everything else — deposit size, gate logic, parking symbol, hold duration, and signal shape — is fixed in the reference month and propagated verbatim. This file is therefore the single source of truth for fund parameters, gate logic, and signal generation.
+
+## Constants
+
+The header of `main.strategy.ts` declares all fund parameters as named constants. Nothing is hard-coded inside functions; every value can be read at a glance from the top of the file.
+
+<ParamField path="DEPOSIT_USD" type="number" default="1000">
+  Total deposit in USD. Divided equally among every symbol in `BASKET`; the
+  share kept out of the basket by the gate is allocated to `PARKING_SYMBOL`.
+</ParamField>
+
+<ParamField path="PARKING_SYMBOL" type="string" default='"PAXGUSDT"'>
+  Counter-position symbol that receives `1 − gate` of the deposit. PAXG is
+  tokenized gold on Binance, providing a non-correlated parking spot rather
+  than idle cash.
+</ParamField>
+
+<ParamField path="HOLD_MINUTES" type="number" default="10079">
+  Position lifetime in minutes: `7 * 24 * 60 - 1`. Positions close at 23:59
+  on the seventh day and re-enter on the 00:00 hourly tick, avoiding an extra
+  hour in the candle cache.
+</ParamField>
+
+<ParamField path="GATE_SYMBOL" type="string" default='"BTCUSDT"'>
+  The trend indicator symbol. BTC daily candles are used to compute the gate
+  score that scales every basket position.
+</ParamField>
+
+<ParamField path="GATE_WINDOWS_DAYS" type="number[]" default="[20, 25, 30, 35, 40, 45]">
+  Ensemble of lookback windows (days) used by the gate. For each window the
+  strategy asks whether BTC closed higher than that many days ago; the fraction
+  of "yes" answers is the gate. Using an ensemble over a plateau of lookbacks
+  removes sensitivity to any single choice of `N`.
+</ParamField>
+
+<ParamField path="STOP_LOSS_PERCENT" type="number" default="50">
+  Technical stop-loss distance as a percentage below entry. At −50 % on a spot
+  position with no leverage, this level is not reachable within a week; the
+  normal exit path is `time_expired`. The value must exceed
+  `CC_MAX_STOPLOSS_DISTANCE_PERCENT` (set to `100`) so the engine validator
+  accepts it.
+</ParamField>
+
+<ParamField path="TAKE_PROFIT_PERCENT" type="number" default="500">
+  Technical take-profit distance as a percentage above entry. At +500 % on a
+  spot position, this level is unreachable within a week; it exists only to
+  satisfy the engine's position schema.
+</ParamField>
+
+<ParamField path="BASKET" type="string[]">
+  The month's top-20 Binance USDT spot symbols ranked by quote volume in the
+  previous calendar month, with stablecoins, leveraged tokens, and
+  BTC/ETH-derivative wrappers excluded, and a minimum listing age of 90 days.
+  The block is delimited by `// BASKET:BEGIN` and `// BASKET:END` markers so
+  `generate_months.mjs` can replace it without touching any other line.
+
+  ```typescript
+  // BASKET:BEGIN
+  const BASKET = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "LINKUSDT",
+    "XRPUSDT",
+    "BNBUSDT",
+    "EOSUSDT",
+    "LTCUSDT",
+    "TRXUSDT",
+    "BCHUSDT",
+    "BANDUSDT",
+    "OMGUSDT",
+    "XTZUSDT",
+    "ADAUSDT",
+    "ATOMUSDT",
+    "VETUSDT",
+    "ZECUSDT",
+    "WAVESUSDT",
+    "QTUMUSDT",
+    "NEOUSDT",
+    "ALGOUSDT",
+  ];
+  // BASKET:END
+  ```
+</ParamField>
+
+## `getGate()` — Cache.fn Wrapped Async Function
+
+`getGate` computes the BTC trend score and is memoized for one calendar day across all basket symbols. Because the engine uses sampled daily candles and steps once per day (`CC_BACKTEST_STEP_MINUTES: 24 * 60`), `getGate` is called once per day regardless of how many symbols are in `SYMBOL_LIST`.
+
+```typescript
+const getGate = Cache.fn(async (): Promise<number> => {
+  const candles = await getCandles(GATE_SYMBOL, "1d", Math.max(...GATE_WINDOWS_DAYS) + 1);
+  const closes = candles.map(({ close }) => close);
+  const last = closes[closes.length - 1];
+  const up = GATE_WINDOWS_DAYS.filter((days) => last > closes[closes.length - 1 - days]).length;
+  return up / GATE_WINDOWS_DAYS.length;
+}, { interval: "1d" });
+```
+
+**How it works:**
+
+- Fetches `Math.max(...GATE_WINDOWS_DAYS) + 1 = 46` closed daily candles for `BTCUSDT` via `getCandles`. The engine clips the candle series at the current backtest timestamp, so no future data leaks in.
+- Extracts the `close` series and computes `up`: the count of windows in `GATE_WINDOWS_DAYS` where the last close is strictly greater than the close `N` days earlier.
+- Returns `up / GATE_WINDOWS_DAYS.length`, a value from `0` (all windows bearish) to `1` (all windows bullish).
+- Wrapped in `Cache.fn` with `{ interval: '1d' }`: the result is computed once per day for all symbols and automatically invalidated when the engine advances to the next day.
+
+## `addStrategySchema` — `getSignal`
+
+The strategy registers a single schema named `"index_fund"` with a 1-hour tick interval. The `getSignal` callback is invoked once per tick per symbol and either returns a signal object or `null`.
+
+```typescript
+addStrategySchema({
+  strategyName: "index_fund",
+  interval: "1h",
+  getSignal: async (symbol, when, currentPrice) => {
+
+    const gate = await getGate();
+
+    const cost = symbol === PARKING_SYMBOL
+      ? DEPOSIT_USD * (1 - gate)
+      : PER_SYMBOL_USD * gate;
+
+    // cost: 0 is silently replaced by the engine with CC_POSITION_ENTRY_COST,
+    // so a zero allocation must be signalled as null
+    if (cost < 1) {
+      return null;
+    }
+
+    return {
+      id: `${symbol.toLowerCase()}-${when.toISOString().slice(0, 10)}`,
+      symbol,
+      ...Position.bracket({
+        position: "long",
+        currentPrice,
+        percentStopLoss: STOP_LOSS_PERCENT,
+        percentTakeProfit: TAKE_PROFIT_PERCENT,
+      }),
+      cost: Math.round(cost * 100) / 100,
+      minuteEstimatedTime: HOLD_MINUTES,
+      payload: { gate, weight: cost / DEPOSIT_USD, basketSize: BASKET.length },
+      note: `${symbol} gate=${gate.toFixed(2)} cost=$${cost.toFixed(2)}`,
+    };
+  },
+});
+```
+
+### Parameters
+
+<ParamField path="symbol" type="string">
+  The Binance pair currently being evaluated, e.g. `"BTCUSDT"` or
+  `"PAXGUSDT"`. Determines whether the basket allocation or the parking
+  allocation formula is applied.
+</ParamField>
+
+<ParamField path="when" type="Date">
+  The current backtest timestamp provided by the engine. Used to construct the
+  signal `id` and slice candle history without look-ahead.
+</ParamField>
+
+<ParamField path="currentPrice" type="number">
+  The latest price from the exchange adapter at the current tick. Passed
+  directly to `Position.bracket` to compute absolute stop and take-profit
+  levels.
+</ParamField>
+
+### Return value
+
+Returns `null` when `cost < 1` (gate or allocation has driven the position size below one dollar). Otherwise returns a signal object with the following fields:
+
+| Field | Value | Description |
+|---|---|---|
+| `id` | `` `${symbol.toLowerCase()}-${YYYY-MM-DD}` `` | Prevents duplicate signals per symbol per day |
+| `symbol` | Binance pair string | The symbol this position is opened on |
+| `...Position.bracket(...)` | `{ entryPrice, stopLoss, takeProfit }` | Spread of bracket levels computed from `currentPrice` at ±50 % / +500 % |
+| `cost` | `Math.round(cost * 100) / 100` | Position size in USD, rounded to 2 decimal places |
+| `minuteEstimatedTime` | `10079` | Time-exit after one week minus one minute |
+| `payload.gate` | `0` – `1` | Gate score at signal time, stored in the report for analysis |
+| `payload.weight` | `cost / DEPOSIT_USD` | Fraction of total deposit allocated to this leg |
+| `payload.basketSize` | `BASKET.length` | Basket size at signal time (20 for the reference month) |
+| `note` | human-readable string | Debug string, e.g. `"BTCUSDT gate=0.83 cost=$41.67"` |
+
+### `Position.bracket`
+
+`Position.bracket` computes the absolute stop-loss and take-profit prices from a percentage distance:
+
+```typescript
+Position.bracket({
+  position: "long",
+  currentPrice,
+  percentStopLoss: 50,
+  percentTakeProfit: 500,
+})
+```
+
+The spread result is destructured directly into the signal object, adding `entryPrice`, `stopLoss`, and `takeProfit` fields that satisfy the engine's position schema.
+
+## `listenDoneBacktest` and Shutdown
+
+```typescript
+let doneCount = 0;
+
+listenDoneBacktest(() => {
+  doneCount += 1;
+  if (doneCount >= SYMBOL_LIST.length) {
+    kill();
+  }
+});
+```
+
+`listenDoneBacktest` fires once for every symbol in `SYMBOL_LIST` when that symbol's backtest completes. A local counter `doneCount` increments on each callback. When all symbols (the 20 basket coins plus `PARKING_SYMBOL`) have finished, `kill()` terminates the engine process.
+
+<Note>
+  `kill()` produces exit code 137 (SIGKILL). This is the expected and normal
+  shutdown behavior for a completed backtest. The runner scripts
+  (`generate_strategy.sh` / `generate_strategy.bat`) do not treat a non-zero
+  exit code as an error.
+</Note>
+
+## `addLauncherSchema`
+
+```typescript
+addLauncherSchema({
+  launcherName: "main_launcher",
+  backtest: true,
+  symbolList: SYMBOL_LIST,
+  cache: false,
+});
+```
+
+<ParamField path="launcherName" type="string" default='"main_launcher"'>
+  Unique name for this launcher instance within the engine session.
+</ParamField>
+
+<ParamField path="backtest" type="boolean" default="true">
+  Enables backtest mode; the engine replays the registered frame instead of
+  connecting to a live exchange.
+</ParamField>
+
+<ParamField path="symbolList" type="string[]">
+  `SYMBOL_LIST = [...BASKET, PARKING_SYMBOL]` — all 20 basket symbols plus
+  `"PAXGUSDT"`. Each symbol runs as an independent backtest instance within the
+  same engine process.
+</ParamField>
+
+<ParamField path="cache" type="boolean" default="false">
+  Launcher-level candle cache is disabled. Candles are synthesized in memory
+  on every run via the Yahoo Finance adapter; there is nothing to cache at the
+  launcher level.
+</ParamField>
+
+## `setConfig` Calls
+
+`setConfig` is called once at the top of `main.strategy.ts` before any schema is registered. It is the only place in the month folder where engine configuration is changed — the module files register schemas and adapters but never call `setConfig`.
+
+```typescript
+setConfig({
+  CC_MAX_STOPLOSS_DISTANCE_PERCENT: 100,
+  CC_BACKTEST_STEP_MINUTES: 24 * 60,
+});
+```
+
+<ParamField path="CC_MAX_STOPLOSS_DISTANCE_PERCENT" type="number" default="100">
+  Raised from its default to `100` so that the validator accepts the technical
+  50 % stop-loss distance. Without this override the engine would reject every
+  signal because the default maximum stop distance is smaller than 50 %.
+</ParamField>
+
+<ParamField path="CC_BACKTEST_STEP_MINUTES" type="number" default="1440">
+  Set to `24 * 60 = 1440`. Because the Yahoo Finance adapter produces sampled
+  candles where every minute of a day carries the same daily OHLCV, evaluating
+  positions 1440 times on identical candles is wasteful. This setting makes the
+  engine evaluate each position exactly once per day, matching the granularity
+  of the underlying data source.
+</ParamField>

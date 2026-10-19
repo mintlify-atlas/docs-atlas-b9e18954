@@ -1,0 +1,89 @@
+---
+title: "Known Approximations and Honest Accounting"
+sidebarTitle: "Known Approximations"
+description: "Every deliberate simplification in this backtest template: per-symbol accounting, synthetic intraday paths, leg desynchronisation, and Yahoo aggregate prices."
+---
+
+This project documents its approximations rather than hiding them. Each one listed below is a conscious engineering trade-off — a deliberate decision about where simplicity is worth the cost and where precision would require infrastructure that outweighs the benefit. None of them is an oversight.
+
+<Note>
+  All of these approximations are also documented in `docs/HOWTO.md` in the source repository, alongside the operating instructions for running and extending the backtest.
+</Note>
+
+<AccordionGroup>
+
+<Accordion title="Per-symbol accounting, not a shared portfolio">
+backtest-kit has no shared portfolio balance. Every symbol in the launcher's `symbolList` is an independent backtest; position size is controlled by setting `cost` on each signal.
+
+The "fund" is not a first-class object in the engine — it exists only as arithmetic in the strategy:
+
+- Every basket symbol receives `cost = (DEPOSIT_USD / BASKET.length) × gate`
+- `PAXGUSDT` receives `cost = DEPOSIT_USD × (1 − gate)`
+- Any leg whose computed cost falls below one dollar returns `null` instead of a signal, because the engine silently replaces a zero cost with its default entry cost
+
+The fund's total return for a month is the sum of `pnlCost` over all closed signals in that month's report, divided by `DEPOSIT_USD`.
+
+**Implication:** there is no portfolio-level rebalancing, margin, drawdown limit, or cross-symbol risk management. Each position is sized from the same constant deposit independently of what the others are doing.
+</Accordion>
+
+<Accordion title="Synthetic intraday price path">
+Yahoo Finance provides only daily OHLCV bars. The engine simulates positions on minute candles. The adapter bridges the two using backtest-kit's own `getCandlesSampled`:
+
+- A `1d` request is handled by `getCandlesFilled`, which places bars on a continuous calendar grid and repairs weekends, holidays, and anomalous bars (zeros, hundredfold wicks) with a flat bar copied from neighbouring closes
+- Any interval shorter than one day repeats the repaired daily bar across its constituent minutes or hours
+
+The result is that every minute within a day carries **identical** high, low, and close values — the day's bar, available from the very first minute of the day.
+
+The strategy sets `CC_BACKTEST_STEP_MINUTES: 24 * 60`, so the engine evaluates each position exactly once per daily bar rather than 1 440 times on identical candles.
+
+**For weekly time exits this has zero effect:** the position is held for one week and exits at the daily close of the last day. The simulated path within that week is flat, but the entry and exit prices are correct daily closes.
+
+**For intraday stop-losses it would matter** — but the stop at −50% and the take-profit at +500% are intentionally set at levels that a spot position cannot reach in a week. The only normal exit reason in the reports is `time_expired`.
+</Accordion>
+
+<Accordion title="Leg desynchronisation after gate changes">
+The gold leg (`PAXGUSDT`) and every basket leg re-enter independently after their weekly position closes. Because they may have started on different days, their weekly cycles are not guaranteed to be aligned.
+
+After the first week in which the gate changes mid-week — for example, moving from ⅓ to ⅔ between Monday and Friday — different legs will re-enter on different days of the following week. From that point on, their cycles drift apart and the gate value captured in each signal's `payload` can differ between legs that nominally belong to the same week.
+
+`docs/HOWTO.md` describes two ways to remove this:
+
+1. Close all open positions on the tick where the gate changes and re-open all legs atomically at the new size
+2. Compute a single combined signal per week that covers all legs together
+
+The repository deliberately ships the simpler version — independent re-entry with no synchronisation — because it requires no additional coordination logic and the drift is visible and auditable in each signal's `payload`.
+</Accordion>
+
+<Accordion title="Yahoo Finance aggregate prices">
+Yahoo Finance returns aggregate (adjusted) prices, not the exact Binance spot close. For most tokens the two track closely, but several known cases exist where they diverge systematically:
+
+- **APE-USD, ARB-USD, TON-USD** — ticker name collisions: Yahoo's `BASE-USD` belongs to a different token with the same abbreviation
+- **OP-USD before October 2022** — a piece of foreign price history was spliced into the series before Optimism's own data begins
+
+The `verify_yahoo_tickers.mjs` script catches these by comparing Yahoo closing prices against Binance monthly closes at both edges of every basket month (the close of the preceding month and the close of the basket month itself). The divergence threshold is **15%**.
+
+- If bad months represent **more than half** of the months compared for a ticker, the ticker is set to `null` in `yahoo_tickers.json` and the reason is written to `yahoo_tickers_rejected.json`
+- If only **isolated months** are bad, those months are recorded in the `badMonths` field of the ticker entry, and `build_universe.mjs` excludes the coin from those months while keeping it in the others
+
+Pass `--only SYM1,SYM2` to `verify_yahoo_tickers.mjs` for a targeted spot-check of specific symbols.
+</Accordion>
+
+<Accordion title="Price resolution floor">
+Yahoo Finance stores prices with 7 significant digits. For tokens whose price falls below `1e-5` USD, this means the smallest representable price step is larger than 1% of the price — too coarse for return calculations to be meaningful.
+
+A concrete example: PEPE trades at approximately `8e-7` USD. At that price level, a 7-digit representation has a step of roughly 12%, which would dominate any return signal.
+
+`build_universe.mjs` enforces `MIN_PRICE = 1e-5` as a filter: months where a token's Binance close falls below this threshold are treated as bad months and excluded from the basket. The same threshold is applied by `verify_yahoo_tickers.mjs` when comparing edges.
+</Accordion>
+
+<Accordion title="Constants are not optimised to PnL">
+The strategy parameters were chosen to describe the process, not to maximise any reported return:
+
+- **Gate windows `[20, 25, 30, 35, 40, 45]`** are a plateau identified in prior research: individual lookbacks outside 25–45 days perform noticeably worse, and within the plateau the result does not depend materially on which specific value is chosen. The ensemble is not a tuned parameter.
+- **Holding period of one calendar week** is a natural unit that matches how an index fund would realistically rebalance. It was not selected by scanning holding periods for the best outcome.
+- **90-day listing age** is a liquidity and data-availability requirement. A coin listed less than 90 days before a month starts does not have enough history to pass the data-source checks and is unlikely to be liquid enough for the basket to reflect genuine market conditions.
+
+The README intentionally does not quote any PnL curves. Quoting a curve from a backtest whose constants were chosen before the backtest ran would conflate engineering decisions with forward-looking claims.
+</Accordion>
+
+</AccordionGroup>

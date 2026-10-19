@@ -1,0 +1,208 @@
+---
+title: "YahooFinance Class: API Key-Free Daily Bar Fetcher"
+sidebarTitle: "YahooFinance"
+description: "Reference for the YahooFinance class: fetches 15 years of daily OHLCV from Yahoo Finance chart API, memoizes per ticker, handles rate limits with retry."
+---
+
+`YahooFinance` is a minimal Yahoo Finance chart API client that retrieves the full 15-year daily OHLCV history for any ticker in a single HTTP request, with no API key and no ccxt dependency. Each month folder carries its own copy in `classes/YahooFinance.ts`, keeping every month self-contained. The public `getCandles` method is signature-compatible with backtest-kit's `getCandlesFilled` / `getCandlesSampled` fetcher argument, so the module can pass it directly to those helpers without an adapter shim.
+
+## `YahooFinanceUtils` Class
+
+```typescript
+import { memoize } from "functools-kit";
+
+type TRawCandle = (number | undefined)[];
+
+const DAY_MS = 86_400_000;
+const RANGE = "15y";
+const RETRY_BASE_MS = 6_000;
+const MAX_ATTEMPTS = 6;
+const USER_AGENT = "Mozilla/5.0";
+
+export class YahooFinanceUtils {
+  private fetchAll = memoize(/* ... */);
+  public getCandles = async (ticker, interval, since, limit): Promise<TRawCandle[]> => { /* ... */ };
+}
+
+export const YahooFinance = new YahooFinanceUtils();
+```
+
+The class exposes two members:
+
+| Member | Visibility | Purpose |
+|---|---|---|
+| `fetchAll` | `private` | Memoized full 15-year history fetch; called at most once per ticker per process lifetime |
+| `getCandles` | `public` | Slices the memoized history by `since` and `limit`; the method the exchange adapter calls |
+
+## `fetchAll` — Memoized Full History Fetch
+
+`fetchAll` is memoized by ticker string using `memoize` from `functools-kit`. The first call for a given ticker downloads the complete 15-year daily series; all subsequent calls for the same ticker return the cached result instantly with no network activity.
+
+```typescript
+private fetchAll = memoize(
+  ([ticker]) => ticker,
+  async (ticker: string): Promise<TRawCandle[]> => {
+    let wait = RETRY_BASE_MS;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const host = attempt % 2 ? "query2" : "query1";
+      const url = `https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?range=${RANGE}&interval=1d&events=none`;
+      const response = await fetch(url, {
+        headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+      });
+      if (response.status === 429) {
+        console.warn(`YahooFinance ${ticker}: rate limited (429), retry in ${wait / 1000}s`);
+        await sleep(wait);
+        wait *= 2;
+        continue;
+      }
+      if (!response.ok) {
+        throw new Error(`YahooFinance ${ticker}: HTTP ${response.status}`);
+      }
+      // ... parse, normalize, return
+    }
+    throw new Error(`YahooFinance ${ticker}: no response after ${MAX_ATTEMPTS} attempts`);
+  },
+);
+```
+
+### Parameters
+
+<ParamField path="ticker" type="string">
+  Yahoo Finance ticker string. Examples: `"BTC-USD"` for Bitcoin, `"GC=F"` for
+  COMEX gold futures, `"^GSPC"` for the S&P 500 index, `"TLT"` for the
+  iShares 20+ Year Treasury ETF. The mapping from Binance symbol to Yahoo
+  ticker is the responsibility of `backtest.module.ts`.
+</ParamField>
+
+### Fetch URL pattern
+
+```
+https://{host}.finance.yahoo.com/v8/finance/chart/{ticker}?range=15y&interval=1d&events=none
+```
+
+- `{host}` alternates between `query2` (odd attempts) and `query1` (even attempts) on each retry.
+- `range=15y` — fetches the maximum available history in one request.
+- `interval=1d` — daily bars only.
+- `events=none` — suppresses dividend and split event fields.
+
+### Rate-limit handling
+
+When Yahoo returns HTTP 429, the client waits `wait` milliseconds and doubles the wait for the next attempt, starting at `RETRY_BASE_MS = 6000 ms`. This continues for up to `MAX_ATTEMPTS = 6` total attempts. If all six attempts fail, an error is thrown.
+
+### Timestamp normalization
+
+Yahoo Finance timestamps represent the session-open time in the exchange's local timezone (e.g., Eastern Time for US equities, UTC for crypto). To produce a consistent UTC midnight key regardless of exchange timezone, each timestamp is normalized with:
+
+```typescript
+const day = Math.floor((t * 1000 + 12 * 3600_000) / DAY_MS) * DAY_MS;
+```
+
+Adding 12 hours before flooring to the nearest day boundary shifts any session-open timestamp within ±12 hours of midnight to the correct UTC date. The result is always a UTC midnight millisecond timestamp.
+
+### Null bar filtering
+
+Before normalization, each bar is checked for null OHLC values:
+
+```typescript
+if ([open, high, low, close].some((v) => v == null)) {
+  return;
+}
+```
+
+Bars with any null OHLC field are silently discarded. Remaining gaps (weekends, holidays) and anomalous bars (zeros, extreme wicks) are repaired downstream by `getCandlesFilled` inside the backtest-kit core, using a flat bar from neighboring closes.
+
+### Return value
+
+An array of `TRawCandle` (`[timestamp, open, high, low, close, volume]`) sorted ascending by timestamp. Bars are deduplicated by normalized day key using a `Map`, so if Yahoo returns two entries that normalize to the same UTC midnight the later one overwrites the earlier.
+
+```typescript
+const candles = [...byDay.values()].sort((a, b) => a[0]! - b[0]!);
+```
+
+A diagnostic log line is printed for each successfully fetched ticker:
+
+```
+YahooFinance BTC-USD: 3784 daily bars 2010-07-17 .. 2025-06-12
+```
+
+## `getCandles` — Sliced History
+
+`getCandles` is the public method consumed by the exchange adapter. It calls `fetchAll` to obtain the full memoized series and then slices it to the requested window.
+
+```typescript
+public getCandles = async (
+  ticker: string,
+  interval: string,
+  since: number,
+  limit: number,
+): Promise<TRawCandle[]> => {
+  if (interval !== "1d") {
+    throw new Error(`YahooFinance: only 1d interval is supported, got ${interval}`);
+  }
+  const all = await this.fetchAll(ticker);
+  const start = Math.floor(since / DAY_MS) * DAY_MS;
+  const out: TRawCandle[] = [];
+  for (const candle of all) {
+    if (candle[0]! < start) {
+      continue;
+    }
+    out.push(candle);
+    if (out.length >= limit) {
+      break;
+    }
+  }
+  return out;
+};
+```
+
+<ParamField path="ticker" type="string">
+  Yahoo Finance ticker string passed through from the exchange adapter.
+</ParamField>
+
+<ParamField path="interval" type="string">
+  Must be `"1d"`. Any other value causes an immediate throw. The Yahoo Finance
+  chart API provides reliable daily history back 15 years; intraday bars are
+  limited to the last 60 days and are not supported by this client.
+</ParamField>
+
+<ParamField path="since" type="number">
+  Start timestamp in milliseconds (Unix epoch). Aligned to day boundary with
+  `Math.floor(since / DAY_MS) * DAY_MS` before filtering, so sub-day
+  precision is discarded.
+</ParamField>
+
+<ParamField path="limit" type="number">
+  Maximum number of daily bars to return. The method stops appending to the
+  output array as soon as it reaches `limit` bars.
+</ParamField>
+
+<Warning>
+  Only `interval: '1d'` is supported. The Yahoo Finance chart API only provides
+  reliable daily history going back 15 years. Intraday data is limited to the
+  last 60 days and is not supported by this client — passing any interval other
+  than `"1d"` throws immediately.
+</Warning>
+
+## `YahooFinance` Singleton Export
+
+`YahooFinanceUtils` is instantiated once at module load time and exported as the `YahooFinance` singleton:
+
+```typescript
+export const YahooFinance = new YahooFinanceUtils();
+```
+
+Because `fetchAll` is memoized at the instance level, the singleton ensures that each ticker is downloaded at most once for the lifetime of a single engine process, regardless of how many times `getCandles` is called for that ticker across all symbols and strategy ticks.
+
+Each month folder contains its own copy of `classes/YahooFinance.ts`. This is intentional: months are fully self-contained and share no runtime code, so a change to `YahooFinance.ts` in a future month cannot retroactively alter the behavior of a month that has already been run.
+
+## Supported Ticker Formats
+
+| Format | Example | Use case |
+|---|---|---|
+| `BASE-USD` | `BTC-USD` | Standard crypto pair; the default mapping applied by `tickerOf()` in the exchange module |
+| `BASE<N>-USD` | `UNI7083-USD` | Disambiguated crypto ticker with a numeric suffix assigned by Yahoo when multiple tokens share the same base name |
+| Futures | `GC=F` | Gold futures (COMEX); used by the `multi_asset` portfolio folder |
+| Index | `^GSPC` | S&P 500 index; used by the `multi_asset` portfolio folder |
+| ETF | `TLT` | iShares 20+ Year Treasury Bond ETF; used by the `multi_asset` portfolio folder |
+
+Tickers with numeric suffixes (e.g., `UNI7083-USD`) are discovered by `scripts/common/resolve_yahoo_tickers.mjs` and stored in `scripts/common/yahoo_tickers.json`. The generator writes them into the `TICKER_OVERRIDES` block of `backtest.module.ts` for the affected months.

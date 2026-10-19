@@ -1,0 +1,86 @@
+---
+title: "BTC Trend Gate: Six-Window Ensemble for Market Exposure"
+sidebarTitle: "BTC Trend Gate"
+description: "How the Bitcoin trend gate uses a six-window ensemble (20–45 days) to scale crypto basket exposure from 0 to 1, with no look-ahead via Cache.fn."
+---
+
+The trend gate is the fund's risk switch. Rather than picking a single moving-average threshold and treating it as a parameter to optimise, the strategy asks the same yes/no question at six different lookback lengths and takes the fraction of "yes" answers as the basket's exposure. This turns a binary on/off signal into a graduated scale from 0 to 1, and it makes the result structurally insensitive to the precise choice of lookback window within the plateau.
+
+## Gate Formula
+
+```
+gate = count of N in {20, 25, 30, 35, 40, 45}
+         where close(yesterday) > close(yesterday − N days)
+       ÷ 6
+```
+
+For each window `N`, the gate asks: did Bitcoin close higher today than it did `N` days ago? The answer is 1 (yes) or 0 (no). The gate is the mean of those six answers. Because there are exactly six windows, the result is always one of seven discrete values:
+
+| Votes "yes" | Gate value | Fraction |
+|:-----------:|:----------:|:--------:|
+| 0 | 0 | 0 % in basket |
+| 1 | 1/6 ≈ 0.167 | ~17 % in basket |
+| 2 | 2/6 ≈ 0.333 | ~33 % in basket |
+| 3 | 3/6 = 0.500 | 50 % in basket |
+| 4 | 4/6 ≈ 0.667 | ~67 % in basket |
+| 5 | 5/6 ≈ 0.833 | ~83 % in basket |
+| 6 | 1 | 100 % in basket |
+
+## Implementation: `getGate`
+
+The gate is implemented as a memoised async function wrapped in `Cache.fn`:
+
+```ts
+const GATE_SYMBOL = "BTCUSDT";
+const GATE_WINDOWS_DAYS = [20, 25, 30, 35, 40, 45];
+
+const getGate = Cache.fn(async (): Promise<number> => {
+  const candles = await getCandles(GATE_SYMBOL, "1d", Math.max(...GATE_WINDOWS_DAYS) + 1);
+  const closes = candles.map(({ close }) => close);
+  const last = closes[closes.length - 1];
+  const up = GATE_WINDOWS_DAYS.filter((days) => last > closes[closes.length - 1 - days]).length;
+  return up / GATE_WINDOWS_DAYS.length;
+}, { interval: "1d" });
+```
+
+`getCandles(GATE_SYMBOL, "1d", 46)` requests the last 46 closed daily bars of `BTCUSDT` from the exchange adapter. The engine trims this call to the current backtest timestamp, so the last bar in the returned array is always the most recently **closed** daily bar — yesterday's bar at the time the strategy is evaluated. There is no way for the gate to see today's intraday price.
+
+## Why an Ensemble, Not a Single MA
+
+A single moving-average crossover is a knife-edge parameter: moving the threshold by five days can produce a materially different result. The six-window ensemble deliberately spans a *plateau* in the optimisation landscape:
+
+- Lookbacks shorter than 20 days or longer than 45 days perform noticeably worse in backtests across the dataset
+- Within the 20–45 range, individual windows show similar but not identical performance
+- By averaging across the plateau, the gate is not tuned to any single value; the strategy does not claim to have discovered a magic number
+
+The constants `GATE_WINDOWS_DAYS = [20, 25, 30, 35, 40, 45]` are documented in the source as a found plateau, not a fitted parameter.
+
+## No Look-Ahead via `Cache.fn`
+
+`Cache.fn` with `{ interval: "1d" }` caches the return value for the duration of one calendar day of backtest time. When the engine advances to the next day, the cache is automatically invalidated and `getGate` is called again. This means:
+
+- The gate is computed **once per day** regardless of how many symbols are in `SYMBOL_LIST`
+- All 21 symbol evaluations within the same daily step share the identical gate value
+- There is no risk of the cache serving a stale value across a day boundary
+
+Because `getCandles` is trimmed at the current engine time, and `Cache.fn` re-executes after each day boundary, the gate can never incorporate information from a bar that has not yet closed.
+
+## Exposure Allocation
+
+The gate value drives the split between the crypto basket and the gold parking position:
+
+| Gate | Basket exposure | PAXG (gold) exposure |
+|:----:|:---------------:|:--------------------:|
+| 0 | 0 % | 100 % |
+| 1/6 | ~17 % | ~83 % |
+| 2/6 | ~33 % | ~67 % |
+| 3/6 | 50 % | 50 % |
+| 4/6 | ~67 % | ~33 % |
+| 5/6 | ~83 % | ~17 % |
+| 1 | 100 % | 0 % |
+
+When `gate = 1`, every basket symbol is fully sized and `PAXGUSDT` returns `null` (no signal). When `gate = 0`, every basket symbol returns `null` and the entire deposit moves into gold. At intermediate values both legs are active simultaneously, with sizes that sum to the full deposit.
+
+<Info>
+  The strategy sets `CC_BACKTEST_STEP_MINUTES: 24 * 60` in `setConfig`, which instructs the engine to advance in steps of exactly one full day. Combined with `Cache.fn { interval: "1d" }`, this means `getGate` is executed precisely once per daily bar — not once per hourly tick. The `addStrategySchema` still declares `interval: "1h"` (for position re-entry at the hourly boundary after time exit), but position *evaluation* happens only at the daily step boundary.
+</Info>

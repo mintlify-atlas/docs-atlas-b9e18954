@@ -1,0 +1,86 @@
+---
+title: "summarize_reports.mjs — Aggregate All Monthly JSONL Reports"
+sidebarTitle: "summarize_reports"
+description: "Reference for summarize_reports.mjs: reads all monthly backtest.jsonl files, prints a P&L table by month and year, cumulative drawdown, and non-time closes."
+---
+
+`summarize_reports.mjs` walks every `content/<mon>_<yyyy>/` folder, reads the JSONL report produced by the backtest engine, and prints a multi-section text table covering per-month P&L, per-year aggregation, cumulative drawdown, and any position closes that did not happen by time expiry.
+
+## Usage
+
+```bash
+node scripts/common/summarize_reports.mjs [--deposit 1000]
+```
+
+## Flags
+
+<ParamField path="--deposit" type="number" default="1000">
+  The `DEPOSIT_USD` value used in the strategy files. All percentage calculations divide dollar P&L by this number. If you ran the strategies with a different deposit constant, pass that value here to get accurate percentages.
+</ParamField>
+
+## Report File Lookup
+
+For each month folder the script looks for a report in two locations, in order:
+
+1. `content/<month>/dump/report/backtest.jsonl` — written by the engine during a live backtest run.
+2. `content/<month>/assets/backtest.jsonl` — used for pre-run snapshots committed to the repository.
+
+If neither file exists the month is listed in the output as `(no report)` and is excluded from all aggregations.
+
+## Output Sections
+
+### Per-month table
+
+Each row covers one calendar month and contains:
+
+| Column | Description |
+|---|---|
+| `month` | `YYYY-MM` key of the month |
+| `opened` | Number of `opened` action rows in the report |
+| `closed` | Number of `closed` action rows in the report |
+| `net$` | Net dollar P&L after engine costs (`pnlCost` summed across all closed positions) |
+| `net%` | `net$ / deposit × 100` |
+| `fees$` | Estimated round-trip cost: `sum(cost) × 0.004` across all closed positions |
+| `gross%` | `(net$ + fees$) / deposit × 100` — P&L before estimated fees |
+| `PAXG$` | Net dollar P&L from the gold counter-position (`PAXGUSDT`) only |
+| `gate range` | Min and max gate values seen in `opened` payloads for non-PAXG symbols |
+| `non-time closes` | `closeReason:count` for any close reason other than `time_expired` |
+
+A row is flagged `OPEN!=CLOSED` when `opened != closed`, indicating the month's backtest did not complete all positions.
+
+### Per-year aggregation
+
+Months are grouped by year. Each year row shows: months in the year, total trades, net$, net%, fees$, gross%.
+
+### TOTAL row
+
+A single summary row across all years showing cumulative net$, fees$, and the annualized simple return calculated as `net$ / deposit / years × 100`.
+
+### Cumulative P&L
+
+Closed positions are sorted by `closeTime` and equity is tracked from the initial deposit. This section prints:
+
+- **Final equity** — deposit plus all net P&L
+- **Peak equity** — highest equity reached at any point
+- **Max drawdown** — largest peak-to-trough drop in dollars and as a percentage of the peak, with the date of the trough close
+
+### Non-time closes (up to 30)
+
+Lists every close whose `closeReason` is not `time_expired`, showing: month, symbol, close reason, PnL%, open price, and close price. Only the first 30 are printed; the total count is always shown.
+
+## Fee Estimation
+
+The script estimates round-trip trading costs as `cost × 0.004` per closed position. This corresponds to 0.1% exchange fee plus 0.1% slippage on each of the two sides of a round trip. The `pnlCost` value already stored in each report row is the engine's own net figure (actual costs deducted by the engine); the estimated `fees$` column shows what was paid above the gross P&L, not an additional deduction.
+
+<Note>
+  Every non-time close (stop-loss, take-profit, or any other unexpected close reason) should be individually investigated as a potential data quality issue. Weekly positions with stops set at −50% and take-profits at +500% should never trigger on genuine data; a hit almost always indicates a corrupted or mismatched candle series for that coin in that month.
+</Note>
+
+<Tip>
+  The script writes only to stdout. For long histories spanning many months, pipe the output to a pager or redirect to a file:
+
+  ```bash
+  node scripts/common/summarize_reports.mjs | less
+  node scripts/common/summarize_reports.mjs > summary.txt
+  ```
+</Tip>

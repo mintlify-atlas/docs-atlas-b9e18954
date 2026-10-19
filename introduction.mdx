@@ -1,0 +1,69 @@
+---
+title: "Backtest Index Fund: No-Survivorship Crypto Backtesting"
+sidebarTitle: "Introduction"
+description: "Backtest Index Fund is a TypeScript template for replaying a weekly crypto index fund month by month using real Binance volume rankings and Yahoo Finance data."
+---
+
+Most "crypto index" ideas die on two details that are easy to hand-wave in a spreadsheet and impossible to hand-wave in an engine: which coins were actually in the index on a given month (not the ones that survived until today), and what happens to the money when the index is not worth holding. This repo answers both mechanically. The basket of each month is frozen into that month's folder from data that was known before the month started, and the deposit never sits idle — the trend gate moves it between the alt basket and gold, week by week, with the whole decision visible in every signal's `payload`.
+
+## What Problem It Solves
+
+A naïve crypto-index backtest built from today's top coins is contaminated by survivorship bias: it quietly includes only the assets that made it to the present day and ignores every delisted or forgotten token. **Backtest Index Fund** removes that distortion by rebuilding the basket every month from the **previous** month's Binance volume rankings. Delisted coins appear in the baskets of the months when they were actually liquid; this year's memecoins are absent from 2021.
+
+The second problem — what to do when the index is not worth holding — is answered by the trend gate. When Bitcoin's ensemble trend score is low, the strategy does not go to cash; it parks the unused deposit in tokenised gold (PAXG) for the same weekly window. The fund is always fully deployed.
+
+## Key Design Decisions
+
+<CardGroup cols={2}>
+  <Card title="Copy-Paste Over Abstraction" icon="copy">
+    Month folders are stamped from one reference, never imported from a shared module. A refactor cannot change the result of a month that already ran.
+  </Card>
+  <Card title="setConfig Only in the Strategy" icon="sliders">
+    The exchange module registers schemas and adapters. It does not alter engine behaviour — `setConfig` lives exclusively in `main.strategy.ts`.
+  </Card>
+  <Card title="Constants Describe the Process" icon="list-check">
+    Gate windows, holding period, and listing-age filter are fixed by methodology, not tuned to a PnL curve. The README deliberately quotes no return figures.
+  </Card>
+  <Card title="Every Approximation Is Written Down" icon="file-lines">
+    `docs/HOWTO.md` is the operating manual: prerequisites, the universe/resolve/verify loop, known gaps such as leg desynchronisation and daily-bar sampling.
+  </Card>
+</CardGroup>
+
+## Four Core Mechanisms at a Glance
+
+| Mechanism | What it does |
+|---|---|
+| **Basket** | Top-20 Binance USDT pairs by prior-month volume; 90-day listing age; excludes stables, leveraged tokens, and wrapped/staked BTC or ETH; frozen per month |
+| **Gate** | Share of six BTC lookback windows (20, 25, 30, 35, 40, 45 days) where BTC closed higher; scales basket exposure from 0 to 1 |
+| **Gold counter-position** | `PAXGUSDT` receives `1 − gate` of the deposit for the same week; when the gate is 0 the fund is entirely in gold |
+| **Weekly time-exit** | Every position is opened with a bracket order (stop −50%, take-profit +500%) and a `minuteEstimatedTime` of one week minus one minute; the only normal exit is `time_expired` |
+
+## What the Repo Ships
+
+The repository is a complete, runnable template:
+
+- **73 self-contained month folders** under `content/<mon>_<yyyy>/`, each with its own strategy, Yahoo Finance candle source, and exchange adapter
+- **5 utility scripts** in `scripts/common/`: universe builder, Yahoo ticker resolver, price verifier, month generator, and report summariser
+- **`content/sep_2020/`** — the reference month that all other folders are stamped from; it is the only folder edited by hand
+
+<Note>
+  **Design rule:** never edit a generated month folder directly. Make all strategy changes in the reference month `content/sep_2020/main.strategy.ts`, then run the generator to propagate them across all 73 months:
+
+  ```bash
+  node scripts/common/generate_months.mjs --source content/sep_2020
+  ```
+</Note>
+
+## Explore Further
+
+<CardGroup cols={3}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Install dependencies, start Mongo and Redis, and run your first month-long backtest in three commands.
+  </Card>
+  <Card title="How It Works" icon="gears" href="/how-it-works">
+    A complete walkthrough of the fund mechanics: basket selection, BTC trend gate, PAXG allocation, and the weekly position cycle.
+  </Card>
+  <Card title="Strategy Reference" icon="code" href="/strategy">
+    Annotated source of `main.strategy.ts`: constants, gate calculation, signal return, and the launcher schema.
+  </Card>
+</CardGroup>

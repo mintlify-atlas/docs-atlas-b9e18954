@@ -1,47 +1,82 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Backtest Index Fund"
+sidebarTitle: "Quickstart"
+description: "Install dependencies, start MongoDB and Redis with Docker, and run your first monthly crypto index fund backtest in four steps."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+Backtest Index Fund is a TypeScript template that replays a weekly crypto index fund month by month. Each month is a self-contained folder under `content/` with its own strategy file, Yahoo Finance candle adapter, and exchange module. The four steps below get you from a fresh clone to a completed single-month backtest report.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Warning>
+  MongoDB and Redis **must** be running before you start any backtest. `config/loader.config.ts` calls `waitForInit()` and blocks strategy loading until both services respond. Starting the engine without them will cause it to hang indefinitely.
+</Warning>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the repository and install dependencies">
+    Clone the repo and install all Node.js dependencies. The project requires TypeScript 5+ (declared as a peer dependency) and Node.js 18 or later.
 
     ```bash
-    npm install your-package
+    git clone https://github.com/tripolskypetr/backtest-kit.git
+    cd backtest-kit/backtest-index-fund
+    npm install
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Start the persistence services">
+    The engine uses MongoDB to store signals and session state, and Redis for caching and inter-process coordination. Both are provided as Docker Compose files. Run them in detached mode before starting any strategy.
 
     ```bash
-    your-cli init
+    docker compose -f docker/mongo/docker-compose.yaml up -d
+    docker compose -f docker/redis/docker-compose.yaml up -d
     ```
+
+    MongoDB listens on port `27017` and Redis on port `6379`. The Redis instance requires a password — set the `CC_REDIS_PASSWORD` variable in a `.env` file at the project root before this step. See [Configuration](/configuration) for the exact value.
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Run a single month">
+    Each month folder is an independent entry point. Pass `--backtest` to run in simulation mode, `--ui` to open the browser UI at the end of the run, and `--entry` to point the CLI at the strategy file. The September 2020 folder is the reference month and is always fully populated.
 
     ```bash
-    your-cli start
+    npm start -- --backtest --ui --entry ./content/sep_2020/main.strategy.ts
     ```
+
+    The engine fetches daily candles from Yahoo Finance on demand (one HTTP request per ticker), evaluates each position once per day, and exits the process after all 21 symbols (20 basket coins + PAXGUSDT) have finished.
+  </Step>
+
+  <Step title="View results">
+    After the process exits, the report for the month is written to:
+
+    ```
+    content/sep_2020/dump/report/backtest.jsonl
+    ```
+
+    Each line is a JSON object. `opened` rows record the entry signal and carry `gate`, `weight`, and `basketSize` in their `payload`. `closed` rows carry the realized PnL; `closeReason: "time_expired"` is the normal weekly exit. Pass `--ui` (as in the previous step) to have the engine open the interactive browser UI automatically after the run completes.
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+<Note>
+  Each month's process exits by calling `kill()` once all symbols report `listenDoneBacktest`. This produces a non-zero exit code (typically **137**). The runner scripts treat this as normal termination, not an error. Do not be alarmed if you see a non-zero exit code in your terminal after a successful run.
+</Note>
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+## Run all months in sequence
+
+Once the single-month run works, you can replay the entire history. The generated runner script launches one engine process per month in chronological order:
+
+```bash
+# Linux / macOS
+bash scripts/linux/generate_strategy.sh
+
+# Windows
+scripts\win\generate_strategy.bat
+```
+
+Each process writes its own `content/<month>/dump/report/backtest.jsonl` before exiting. The runner does not parallelise months — it waits for each process to finish before starting the next one.
+
+<Tip>
+  After all months have run, use the summary script to fold every report into a single table:
+
+  ```bash
+  node scripts/common/summarize_reports.mjs
+  ```
+
+  The output includes trades, net PnL, estimated engine costs, gross PnL, the PAXG contribution, the gate range for the month, cumulative P&L with drawdown, and a list of any positions that did **not** close by time expiry. A month where `opened` count differs from `closed` count was interrupted and should be re-run.
 </Tip>

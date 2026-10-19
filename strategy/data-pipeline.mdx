@@ -1,0 +1,147 @@
+---
+title: "Yahoo Finance Daily Bars in a Minute-Resolution Engine"
+sidebarTitle: "Data Pipeline"
+description: "How Yahoo Finance daily bars are fetched without an API key, sampled into minute candles via getCandlesSampled, and the trade-offs this creates for backtesting."
+---
+
+backtest-kit simulates positions against a stream of OHLCV candles, and by default it expects minute-resolution data. Yahoo Finance's chart API only provides daily bars for most assets. The data pipeline bridges these two realities with a chain of adapters: a memoised HTTP fetcher, a candle sampler that repeats each daily bar across its constituent minutes, and a gap-repair pass that handles weekends, holidays, and malformed bars. A single configuration switch then tells the engine to step once per day, collapsing the 1440 identical minute bars into a single evaluation.
+
+## Fetching: `YahooFinance.getCandles`
+
+The `YahooFinanceUtils` class holds two public-facing methods. The entire price history is downloaded in a single HTTP request and kept in memory for the lifetime of the process:
+
+```ts
+private fetchAll = memoize(
+  ([ticker]) => ticker,
+  async (ticker: string): Promise<TRawCandle[]> => {
+    let wait = RETRY_BASE_MS;                    // 6 000 ms
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {  // MAX_ATTEMPTS = 6
+      const host = attempt % 2 ? "query2" : "query1";  // alternates on each retry
+      const url = `https://${host}.finance.yahoo.com/v8/finance/chart/` +
+        `${encodeURIComponent(ticker)}?range=${RANGE}&interval=1d&events=none`;
+                                                 // RANGE = "15y"
+      const response = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+      });
+      if (response.status === 429) {
+        console.warn(`YahooFinance ${ticker}: rate limited (429), retry in ${wait / 1000}s`);
+        await sleep(wait);
+        wait *= 2;          // exponential back-off: 6 s, 12 s, 24 s, …
+        continue;
+      }
+      // … parse, deduplicate by calendar day, sort, return
+    }
+    throw new Error(`YahooFinance ${ticker}: no response after ${MAX_ATTEMPTS} attempts`);
+  },
+);
+```
+
+After a successful fetch, timestamps are normalised to midnight UTC (Yahoo reports session-open times in the exchange's local timezone). `null` values in any of the four OHLC fields cause the bar to be silently dropped before the array is returned — gap-repair in `getCandlesFilled` handles the resulting holes.
+
+The `getCandles` method slices the memoised full history by `since` and `limit`:
+
+```ts
+public getCandles = async (
+  ticker: string,
+  interval: string,
+  since: number,
+  limit: number,
+): Promise<TRawCandle[]> => {
+  if (interval !== "1d") {
+    throw new Error(`YahooFinance: only 1d interval is supported, got ${interval}`);
+  }
+  const all = await this.fetchAll(ticker);
+  const start = Math.floor(since / DAY_MS) * DAY_MS;
+  const out: TRawCandle[] = [];
+  for (const candle of all) {
+    if (candle[0]! < start) continue;
+    out.push(candle);
+    if (out.length >= limit) break;
+  }
+  return out;
+};
+```
+
+Because `fetchAll` is memoised on the ticker string, a month that contains both `BTCUSDT` and the gate symbol `BTCUSDT` in `getGate()` will only ever issue one network request for `BTC-USD` during the entire run.
+
+## Ticker Mapping
+
+Binance symbols follow the pattern `BASEUSDT`. Yahoo Finance tickers for the same asset are typically `BASE-USD`. The exchange module converts one to the other:
+
+```ts
+const TICKER_OVERRIDES: Record<string, string> = {
+  // exceptions for tokens with numeric suffixes or naming conflicts
+};
+
+const tickerOf = (symbol: string): string =>
+  TICKER_OVERRIDES[symbol] ?? symbol.replace(/USDT$/, "-USD");
+```
+
+Tokens where Yahoo uses a numeric suffix (e.g. to distinguish one `APE` from another) or where the obvious `BASE-USD` ticker belongs to an unrelated asset are handled by explicit entries in `TICKER_OVERRIDES`. The resolver script (`resolve_yahoo_tickers.mjs`) and verifier (`verify_yahoo_tickers.mjs`) maintain a per-month record of which tickers are valid; the generator populates `TICKER_OVERRIDES` for each month's module automatically.
+
+## Sampling: `getCandlesSampled` and `getCandlesFilled`
+
+The exchange adapter wires `fetchOHLCV` into backtest-kit's candle infrastructure:
+
+```ts
+const fetchOHLCV = (symbol: string, interval: string, since: number, limit: number) =>
+  YahooFinance.getCandles(tickerOf(symbol), interval, since, limit);
+
+addExchangeSchema({
+  exchangeName: "yahoo-finance",
+  getCandles: async (symbol, interval, since, limit) =>
+    await getCandlesSampled(fetchOHLCV, { symbol, interval, since, limit }),
+});
+```
+
+`getCandlesSampled` dispatches based on the requested interval:
+
+- **`1d` requests** are routed through `getCandlesFilled`, which places bars on a continuous calendar grid and repairs gaps (weekends, public holidays, missing sessions) and anomalous bars (zero prices, hundredfold wicks) with a flat bar interpolated from neighbouring closes. The repair thresholds are controlled by `CC_GET_CANDLES_PRICE_ANOMALY_THRESHOLD_FACTOR` and `CC_GET_CANDLES_MAX_ANOMALY_STREAK`.
+- **Sub-day requests** (minutes, hours) take the repaired daily bar and repeat it across all the constituent minute slots. A `1h` request for Monday's data returns 24 identical hourly bars, each carrying Monday's open, high, low, close, and a volume slice.
+
+## The Daily-Step Optimisation
+
+Because every minute within a day carries identical OHLCV data, evaluating a position 1440 times per day produces the same result as evaluating it once. The strategy sets:
+
+```ts
+setConfig({
+  CC_BACKTEST_STEP_MINUTES: 24 * 60,
+});
+```
+
+This tells the engine to advance in steps of 1440 minutes, so a one-month backtest with 21 symbols executes 21 × 30 = 630 evaluations instead of 21 × 30 × 1440 = 907 200. For the 73-month run this difference is the gap between seconds and minutes of wall-clock time.
+
+## Keeping MongoDB Clean
+
+Synthesised candles have no value outside the current process and should not be written to the database. The adapter disables persistence with a single call:
+
+```ts
+PersistCandleAdapter.useDummy();
+```
+
+MongoDB receives only strategy signals (`opened`, `active`, `closed` rows) and engine state. Candle documents are never written.
+
+<Tip>
+  `PersistCandleAdapter.useDummy()` is the standard pattern for any backtest that generates candles synthetically (samplers, replay from CSV, etc.). Without it, the engine would attempt to persist every synthesised minute bar, filling the database with redundant data and slowing the run significantly.
+</Tip>
+
+## Known Trade-Off: Intraday Path
+
+<Warning>
+  Yahoo Finance reports the daily high, low, and close of a session. These values are not known until the session ends. However, `getCandlesSampled` attaches them to every minute bar from the start of the day. A position that opens at 00:00 will see the final daily close and the full-day high/low immediately. For **weekly time exits** this has no effect: the position closes at 23:59 regardless of intraday prices. For **intraday stop-losses** it would cause premature or delayed triggers, because the high and low are forward-looking within the day. The stop at −50 % and take-profit at +500 % are deliberately set beyond the reach of a one-week spot move precisely to neutralise this effect.
+</Warning>
+
+## Rate Limiting
+
+Yahoo Finance's chart API enforces a per-IP request rate. The fetcher handles `429 Too Many Requests` responses with exponential back-off:
+
+| Attempt | Host | Wait before retry |
+|:-------:|:----:|:-----------------:|
+| 1 | `query2` | — (immediate) |
+| 2 | `query1` | 6 s |
+| 3 | `query2` | 12 s |
+| 4 | `query1` | 24 s |
+| 5 | `query2` | 48 s |
+| 6 | `query1` | 96 s |
+
+If all six attempts return `429`, the fetcher throws a hard error and the backtest run is aborted. In practice the memoisation means each ticker is only fetched once per process, so a 21-symbol month makes at most 21 requests — well within normal thresholds.

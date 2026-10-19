@@ -1,0 +1,153 @@
+---
+title: "backtest.module.ts — Exchange Adapter and Month Frame"
+sidebarTitle: "backtest.module.ts"
+description: "Reference for backtest.module.ts: registers the Yahoo Finance exchange adapter, defines the Binance-to-Yahoo ticker map, and sets the month's backtest frame."
+---
+
+`backtest.module.ts` is the infrastructure half of a month folder. It registers three schemas with the backtest-kit engine — the exchange adapter, the backtest frame, and the ticker map that bridges Binance symbol names to Yahoo Finance ticker strings. The strategy file (`main.strategy.ts`) handles fund logic and engine configuration; this module handles data routing and time-window setup only.
+
+The full source for the reference month (`sep_2020`) is:
+
+```typescript
+import {
+  addExchangeSchema,
+  addFrameSchema,
+  getCandlesSampled,
+  PersistCandleAdapter,
+} from "backtest-kit";
+
+import { YahooFinance } from "../classes/YahooFinance";
+
+const TICKER_OVERRIDES: Record<string, string> = {
+};
+
+const tickerOf = (symbol: string): string =>
+  TICKER_OVERRIDES[symbol] ?? symbol.replace(/USDT$/, "-USD");
+
+const fetchOHLCV = (symbol: string, interval: string, since: number, limit: number) =>
+  YahooFinance.getCandles(tickerOf(symbol), interval, since, limit);
+
+addExchangeSchema({
+  exchangeName: "yahoo-finance",
+  getCandles: async (symbol, interval, since, limit) =>
+    await getCandlesSampled(fetchOHLCV, { symbol, interval, since, limit }),
+});
+
+PersistCandleAdapter.useDummy();
+
+addFrameSchema({
+  frameName: "sep_2020_frame",
+  interval: "1h",
+  startDate: new Date("2020-09-01T00:00:00Z"),
+  endDate: new Date("2020-09-30T23:59:59Z"),
+  note: "September 2020",
+});
+```
+
+## `TICKER_OVERRIDES` Constant
+
+```typescript
+const TICKER_OVERRIDES: Record<string, string> = {
+};
+```
+
+`TICKER_OVERRIDES` is a `Record<string, string>` that maps a Binance symbol (e.g., `"UNIUSDT"`) to its exact Yahoo Finance ticker (e.g., `"UNI7083-USD"`). The map is empty in the reference month because all September 2020 basket symbols resolve cleanly via the default rule. For months where a coin's Yahoo ticker carries a numeric disambiguator suffix, `generate_months.mjs` populates this block automatically when stamping that month's folder.
+
+### `tickerOf` helper
+
+```typescript
+const tickerOf = (symbol: string): string =>
+  TICKER_OVERRIDES[symbol] ?? symbol.replace(/USDT$/, "-USD");
+```
+
+`tickerOf` applies the override map first; if the symbol has no explicit entry it falls back to stripping `USDT` and appending `-USD` — the convention Yahoo uses for most crypto pairs (e.g., `BTCUSDT` → `BTC-USD`, `ETHUSDT` → `ETH-USD`). The `PARKING_SYMBOL` `PAXGUSDT` maps to `PAXG-USD` by this rule.
+
+## `addExchangeSchema`
+
+```typescript
+addExchangeSchema({
+  exchangeName: "yahoo-finance",
+  getCandles: async (symbol, interval, since, limit) =>
+    await getCandlesSampled(fetchOHLCV, { symbol, interval, since, limit }),
+});
+```
+
+Registers the Yahoo Finance data source as the named exchange `"yahoo-finance"`. The engine calls `getCandles` whenever it needs candle data for a symbol during the backtest replay.
+
+<ParamField path="exchangeName" type="string" default='"yahoo-finance"'>
+  The exchange identifier used by the engine to route candle requests. Must
+  match the exchange name expected by the strategy's frame and launcher
+  configuration.
+</ParamField>
+
+<ParamField path="getCandles" type="function">
+  Async function `(symbol, interval, since, limit) => TRawCandle[]`. Delegates
+  to `getCandlesSampled`, passing `fetchOHLCV` as the underlying fetcher.
+
+  - **`fetchOHLCV`** calls `YahooFinance.getCandles(tickerOf(symbol), interval, since, limit)`, translating the Binance symbol to a Yahoo ticker before delegating to the `YahooFinanceUtils` singleton.
+  - **`getCandlesSampled`** handles the daily→sub-daily gap: a `"1d"` interval request is forwarded to `getCandlesFilled`, which puts bars on a continuous calendar grid and repairs weekends, holidays and anomalous bars with a flat bar from neighboring closes. Requests for any shorter interval (e.g., `"1h"` or `"1m"`) receive the repaired daily bar repeated across every minute or hour of that day.
+</ParamField>
+
+<Note>
+  `setConfig` must only be called in `main.strategy.ts`, never in the module.
+  The module registers schemas and adapters only; it does not change engine
+  behavior.
+</Note>
+
+## `PersistCandleAdapter.useDummy()`
+
+```typescript
+PersistCandleAdapter.useDummy();
+```
+
+Disables MongoDB persistence for synthesized candles. By default backtest-kit writes fetched and repaired candles to MongoDB so subsequent runs can skip re-fetching. Because the Yahoo Finance adapter synthesizes intraday candles by sampling a single daily bar in memory, storing them in Mongo would waste space and serve no caching purpose — the daily bar itself is memoized in process memory by `YahooFinanceUtils.fetchAll`. After `useDummy()`, candles are generated in memory on every run and never read from or written to MongoDB.
+
+## `addFrameSchema`
+
+```typescript
+addFrameSchema({
+  frameName: "sep_2020_frame",
+  interval: "1h",
+  startDate: new Date("2020-09-01T00:00:00Z"),
+  endDate: new Date("2020-09-30T23:59:59Z"),
+  note: "September 2020",
+});
+```
+
+Defines the time window within which the engine replays the backtest. `generate_months.mjs` substitutes `frameName`, `startDate`, `endDate`, and `note` when stamping each new month folder from the reference.
+
+<ParamField path="frameName" type="string" default='"sep_2020_frame"'>
+  Unique name for the frame. Auto-substituted per month by the generator, e.g.
+  `"oct_2020_frame"`, `"jan_2021_frame"`.
+</ParamField>
+
+<ParamField path="interval" type="string" default='"1h"'>
+  The strategy tick interval. The engine advances the clock in one-hour steps
+  and calls `getSignal` once per hour per symbol. In practice,
+  `CC_BACKTEST_STEP_MINUTES: 1440` in `setConfig` means only one evaluation
+  fires per day — the hourly cadence is overridden by the step setting.
+</ParamField>
+
+<ParamField path="startDate" type="Date">
+  First instant of the backtest window. Always `00:00:00 UTC` on the first day
+  of the month, e.g. `new Date("2020-09-01T00:00:00Z")`.
+</ParamField>
+
+<ParamField path="endDate" type="Date">
+  Last instant of the backtest window. Always `23:59:59 UTC` on the last day
+  of the month, e.g. `new Date("2020-09-30T23:59:59Z")`.
+</ParamField>
+
+<ParamField path="note" type="string">
+  Human-readable label stored in the frame record, e.g. `"September 2020"`.
+  Appears in engine logs and report metadata.
+</ParamField>
+
+<Tip>
+  The frame interval is `"1h"` but `CC_BACKTEST_STEP_MINUTES: 1440` in
+  `setConfig` (inside `main.strategy.ts`) means only one evaluation per day
+  actually occurs. The hourly tick cadence declared in the frame is overridden
+  by the step setting. This matches the granularity of the underlying Yahoo
+  Finance daily bars, where every intraday minute carries identical OHLCV
+  values.
+</Tip>

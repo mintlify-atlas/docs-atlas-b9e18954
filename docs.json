@@ -1,72 +1,90 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Backtest Kit",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
-  },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "primary": "#1f70c2"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:support@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/backtest-kit/backtest-index-fund"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/backtest-kit/backtest-index-fund"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guide",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "how-it-works"
+            ]
+          },
+          {
+            "group": "Getting Started",
+            "pages": [
+              "quickstart",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Strategy Internals",
+            "pages": [
+              "strategy/basket-selection",
+              "strategy/btc-trend-gate",
+              "strategy/allocation-and-cycle",
+              "strategy/data-pipeline"
+            ]
+          },
+          {
+            "group": "Running Backtests",
+            "pages": [
+              "running/single-month",
+              "running/all-months",
+              "running/reading-reports"
+            ]
+          },
+          {
+            "group": "Extending the Template",
+            "pages": [
+              "extending/regenerating-months",
+              "extending/multi-asset",
+              "extending/known-approximations"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Scripts",
+            "pages": [
+              "reference/build-universe",
+              "reference/resolve-yahoo-tickers",
+              "reference/verify-yahoo-tickers",
+              "reference/generate-months",
+              "reference/summarize-reports"
+            ]
+          },
+          {
+            "group": "Source Modules",
+            "pages": [
+              "reference/main-strategy",
+              "reference/yahoo-finance-class",
+              "reference/backtest-module"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

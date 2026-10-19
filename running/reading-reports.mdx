@@ -1,0 +1,142 @@
+---
+title: "Reading JSONL Reports and the Summarizer Output"
+sidebarTitle: "Reading Reports"
+description: "How to interpret the per-month JSONL report rows (opened, active, closed) and the summarize_reports.mjs table columns including gate range and non-time closes."
+---
+
+Every month writes its results to a newline-delimited JSON file. The per-month file is the primary data source for analysis: each line captures one moment in the lifecycle of one signal, and the aggregate summarizer folds all months into a single table. Understanding both formats is the first step to auditing what the fund actually did.
+
+## Report Location
+
+The live report written by each run is at:
+
+```
+content/<month>/dump/report/backtest.jsonl
+```
+
+The repository also ships static snapshots copied to:
+
+```
+content/<month>/assets/backtest.jsonl
+```
+
+`summarize_reports.mjs` checks `dump/report/` first and falls back to `assets/` automatically, so the summarizer works against both a fresh run and the checked-in snapshots.
+
+## JSONL Row Structure
+
+Each line in the report is a self-contained JSON object. Every object has a top-level `symbol` field and a `data` sub-object whose `action` field is one of three values:
+
+| `action` | When it appears |
+|---|---|
+| `opened` | A new position was entered |
+| `active` | A periodic update during the lifetime of the position |
+| `closed` | The position was exited |
+
+### `opened` rows
+
+The `opened` row is the most informative for understanding the fund's allocation decisions. The key fields live in `data.payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `data.payload.gate` | `number` (0–1) | BTC trend gate value for that week — the share of the six lookback windows (20/25/30/35/40/45 days) on which Bitcoin closed higher than N days ago |
+| `data.payload.weight` | `number` (0–1) | `cost / DEPOSIT_USD` — the fraction of the total deposit this position represents |
+| `data.payload.basketSize` | `number` | Number of basket symbols for the month (always 20 for the alt basket; the gold leg PAXGUSDT is separate) |
+
+### `closed` rows
+
+The `closed` row records the outcome of the position:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `data.pnlCost` | `number` | Realized net P&L in USD for this position |
+| `data.pnl` | `number` | Realized P&L as a percentage of entry cost |
+| `data.closeReason` | `string` | Why the position was closed (see below) |
+| `data.cost` | `number` | Entry cost in USD (used by the summarizer to estimate fees) |
+| `data.priceOpen` | `number` | Price at which the position was entered |
+| `data.pnlPriceClose` | `number` | Price at which the position was closed |
+
+### `closeReason` values
+
+| Value | Meaning |
+|---|---|
+| `time_expired` | Normal weekly exit — the `minuteEstimatedTime` of one week minus one minute elapsed |
+| `stop_loss` | The −50% stop was hit — this should not happen on weekly spot positions and almost always indicates a data anomaly in the Yahoo Finance bars; investigate |
+| `take_profit` | The +500% take-profit was hit — equally anomalous on a one-week horizon; investigate |
+
+## Sample JSONL Lines
+
+```jsonl
+{"symbol":"BTCUSDT","data":{"action":"opened","id":"btcusdt-2020-09-07","symbol":"BTCUSDT","position":"long","priceOpen":10280.45,"stopLoss":5140.22,"takeProfit":61682.70,"cost":50.00,"minuteEstimatedTime":10079,"payload":{"gate":1.00,"weight":0.05,"basketSize":20},"note":"BTCUSDT gate=1.00 cost=$50.00"}}
+{"symbol":"BTCUSDT","data":{"action":"closed","id":"btcusdt-2020-09-07","symbol":"BTCUSDT","closeReason":"time_expired","pnlCost":-1.83,"pnl":-3.66,"cost":50.00,"priceOpen":10280.45,"pnlPriceClose":9904.28,"closeTime":1600300740000}}
+```
+
+The `opened` row shows gate `1.00` — all six BTC lookback windows were bullish that week — and a weight of `0.05`, meaning the position consumed 5% of the $1000 deposit (one of twenty equal basket slots). The matching `closed` row shows the position exited by `time_expired` with a small loss of $1.83.
+
+## The `summarize_reports.mjs` Table
+
+Running `node scripts/common/summarize_reports.mjs` prints two tables (monthly and yearly) and a cumulative summary line.
+
+### Monthly table columns
+
+```
+month    opened closed  net$     net%   fees$  gross%  PAXG$  gate      non-time closes
+2020-09     168    168     142   14.2%     18   15.9%     22  1.00..1.00
+2020-10     168    168      87    8.7%     18   10.5%      8  0.83..1.00
+2020-11     168    168     210   21.0%     18   22.8%     -1  0.83..1.00
+```
+
+| Column | Meaning |
+|---|---|
+| `month` | Calendar month in `YYYY-MM` format |
+| `opened` | Number of `opened` rows in the report |
+| `closed` | Number of `closed` rows — should equal `opened`; a mismatch means the run was interrupted |
+| `net$` | Net realized P&L for the month in USD (sum of all `pnlCost` values) |
+| `net%` | `net$ / DEPOSIT_USD × 100` — P&L as a percentage of the fixed deposit |
+| `fees$` | Estimated round-trip cost: `cost × 0.4% × 2 sides` (0.1% fee + 0.1% slippage per side, engine defaults) — note that `pnlCost` in the report is already net of these costs |
+| `gross%` | `(net$ + fees$) / DEPOSIT_USD × 100` — P&L before estimated fees |
+| `PAXG$` | Gold leg contribution — net P&L from `PAXGUSDT` positions only |
+| `gate` range | `min..max` gate value observed across all `opened` rows for non-PAXG symbols during the month |
+| `non-time closes` | Positions that did not exit via `time_expired`, shown as `closeReason:count` — each entry warrants a data check |
+
+### Yearly summary table columns
+
+```
+year   months trades    net$    net%   fees$  gross%
+2020       4    672     475   47.5%     72   54.7%
+2021      12   2016    1840  184.0%    218  205.8%
+```
+
+| Column | Meaning |
+|---|---|
+| `year` | Calendar year |
+| `months` | Number of month folders with reports in that year |
+| `trades` | Total number of closed positions |
+| `net$` / `net%` | Aggregated net P&L for the year |
+| `fees$` / `gross%` | Estimated fees and gross return for the year |
+
+### TOTAL row
+
+```
+TOTAL    73   15288   12540 1254.0%   1501 1404.1%   (6.1 years: net 205.6%/y simple, gross 230.1%/y)
+```
+
+The TOTAL row shows cumulative P&L across all months, the number of years covered, and the annualized simple return (not compounded — the deposit is fixed). The summarizer also prints a separate line:
+
+```
+cumulative P&L: final 13540, peak 14200, max drawdown -660$ (-5% of peak) at 2022-06-15
+```
+
+This is computed by replaying all closed positions in order of their `closeTime`, tracking equity from the starting `DEPOSIT_USD`, and recording the largest peak-to-trough decline in dollar terms along with the date it reached its low.
+
+## Non-Time Closes Section
+
+If any position closed for a reason other than `time_expired`, the summarizer prints a dedicated section after the tables listing up to 30 such positions with their symbol, month, close reason, P&L percentage, and open/close prices:
+
+```
+3 closes not by time (check the data behind them):
+  2021-05 ADAUSDT       stop_loss      pnl  -49.8%  open 1.572 close 0.794
+```
+
+<Tip>
+  Every non-`time_expired` close is worth investigating individually. A `stop_loss` on a weekly spot position means the Yahoo Finance bar for that symbol on that date showed a drop of 50% or more — almost certainly a data error such as a zero bar, a split artefact, or a ticker collision (e.g. `APE-USD` mapping to the wrong asset). Cross-check the open and close prices shown in the non-time closes list against the Binance monthly candle for the same ticker and date.
+</Tip>

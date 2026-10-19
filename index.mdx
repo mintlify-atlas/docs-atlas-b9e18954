@@ -1,20 +1,83 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Backtest Index Fund: Weekly Crypto Index with BTC Trend Gate"
+sidebarTitle: "Home"
+description: "A TypeScript backtesting template for a weekly crypto index fund. Top-20 Binance pairs by volume, BTC trend gate, and PAXG gold counter-position — replayed month by month."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Backtest Index Fund is a fully self-contained TypeScript research template built on [backtest-kit](https://github.com/tripolskypetr/backtest-kit). It simulates a weekly crypto index fund that holds the top-20 Binance USDT pairs by prior-month volume, scales market exposure with a six-window BTC trend gate, and parks the remainder in tokenized gold (PAXG) — all replayed month-by-month from September 2020 onward with real Yahoo Finance daily bars.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install dependencies, start Docker services, and run your first monthly backtest in minutes.
+  </Card>
+  <Card title="How It Works" icon="diagram-project" href="/how-it-works">
+    Understand the fund mechanics: basket selection, trend gate, allocation logic, and weekly cycle.
+  </Card>
+  <Card title="Strategy Internals" icon="code" href="/strategy/basket-selection">
+    Deep-dive into basket construction, the BTC gate formula, position sizing, and the data pipeline.
+  </Card>
+  <Card title="Running Backtests" icon="play" href="/running/single-month">
+    Run a single month, replay all 73 months end-to-end, and read the resulting JSONL reports.
+  </Card>
+  <Card title="Extending the Template" icon="wrench" href="/extending/regenerating-months">
+    Regenerate months with updated baskets, explore the multi-asset variant, and understand known approximations.
+  </Card>
+  <Card title="Script Reference" icon="terminal" href="/reference/build-universe">
+    CLI reference for all five utility scripts: universe builder, ticker resolver, verifier, generator, and summarizer.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What makes this different
+
+Most crypto index backtests fail on two details that are easy to hand-wave in a spreadsheet:
+
+- **Which coins were actually in the index at the time** — not today's survivors, but the coins that were liquid *then*. Each month's basket is frozen from data known before that month started.
+- **What happens to the money when the index is not worth holding** — here the answer is PAXG gold, scaled continuously by a BTC trend gate rather than a binary on/off switch.
+
+<Steps>
+  <Step title="Install dependencies and start services">
+    ```bash
+    npm install
+    docker compose -f docker/mongo/docker-compose.yaml up -d
+    docker compose -f docker/redis/docker-compose.yaml up -d
+    ```
+  </Step>
+  <Step title="Run a single month backtest">
+    ```bash
+    npm start -- --backtest --ui --entry ./content/sep_2020/main.strategy.ts
+    ```
+    Open the UI in your browser to inspect signals, gate values, and per-symbol PnL.
+  </Step>
+  <Step title="Replay all 73 months">
+    ```bash
+    bash scripts/linux/generate_strategy.sh
+    ```
+    Each month writes a `backtest.jsonl` report. One process per month, fully sequential.
+  </Step>
+  <Step title="Summarize results">
+    ```bash
+    node scripts/common/summarize_reports.mjs
+    ```
+    Prints a month-by-month and year-by-year P&L table plus cumulative drawdown.
+  </Step>
+</Steps>
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `content/<mon>_<yyyy>/` | Self-contained strategy folder for each calendar month |
+| `content/<mon>_<yyyy>/main.strategy.ts` | Fund constants, gate logic, signal generation |
+| `content/<mon>_<yyyy>/classes/YahooFinance.ts` | Yahoo Finance daily-bar fetcher |
+| `content/<mon>_<yyyy>/modules/backtest.module.ts` | Exchange adapter, ticker map, month frame |
+| `scripts/common/build_universe.mjs` | Builds monthly top-20 baskets from Binance volume |
+| `scripts/common/resolve_yahoo_tickers.mjs` | Maps Binance symbols to Yahoo tickers |
+| `scripts/common/verify_yahoo_tickers.mjs` | Cross-checks Yahoo prices against Binance |
+| `scripts/common/generate_months.mjs` | Stamps all month folders from the reference month |
+| `scripts/common/summarize_reports.mjs` | Aggregates JSONL reports into a P&L summary |
+| `config/` | Engine loader and persistence setup (not strategy-specific) |
+| `docker/` | MongoDB and Redis compose files |
+
+<Note>
+  The reference month is `content/sep_2020/`. To change the strategy logic, edit that folder and re-run `generate_months.mjs` — never edit generated month folders directly.
+</Note>

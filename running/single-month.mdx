@@ -1,0 +1,85 @@
+---
+title: "Run a Single Month Backtest with the CLI"
+sidebarTitle: "Single Month"
+description: "Step-by-step guide to running one month of the crypto index fund backtest using the backtest-kit CLI, with and without the browser UI."
+---
+
+Each month of the index fund lives in its own self-contained folder under `content/`. Running a single month means launching one CLI process pointed at that month's `main.strategy.ts`. The process loads the strategy, connects to Mongo and Redis, fetches daily candles from Yahoo Finance on demand, evaluates each symbol once per daily bar, and writes every signal action to a JSONL report before terminating.
+
+## Prerequisites
+
+Both Docker services must be running before you start. The config loader (`config/loader.config.ts`) waits for Mongo and Redis to become available before loading any strategy — if either service is down the process will hang at startup.
+
+```bash
+docker compose -f docker/mongo/docker-compose.yaml up -d
+docker compose -f docker/redis/docker-compose.yaml up -d
+```
+
+## CLI Command Structure
+
+The backtest-kit CLI is invoked through `npm start` with arguments passed after the `--` separator:
+
+```
+npm start -- --backtest [--ui] --entry ./content/<month>/main.strategy.ts
+```
+
+| Flag | Purpose |
+|---|---|
+| `--backtest` | Enables backtest mode; without it the CLI runs in live-trading mode |
+| `--ui` | Opens the browser interface so you can inspect signals as they are generated |
+| `--entry` | Path to the strategy file for the month you want to replay |
+
+## Running a Month
+
+### Without the browser UI (headless)
+
+Use this when you want a fast terminal run with no browser interaction:
+
+```bash
+# Without UI (headless)
+npm start -- --backtest --entry ./content/sep_2020/main.strategy.ts
+```
+
+### With the browser UI
+
+Add `--ui` to open the backtest-kit interface at `localhost:8080` while the run is in progress. You can watch signals being created and closed in real time:
+
+```bash
+# With browser UI
+npm start -- --backtest --ui --entry ./content/sep_2020/main.strategy.ts
+```
+
+## What Happens During the Run
+
+The strategy sets `CC_BACKTEST_STEP_MINUTES` to `1440` (one full day), so the engine advances one daily bar per evaluation step instead of ticking through 1440 identical candle copies. For a month of 30 days with 21 symbols (20 basket coins plus PAXGUSDT) that is 630 evaluation steps total.
+
+At each step the strategy:
+
+1. Calls `getGate()` — cached once per day — to compute the BTC trend gate from six lookback windows (20, 25, 30, 35, 40, 45 days).
+2. Derives each symbol's `cost` from the gate: basket symbols receive `(DEPOSIT / basketSize) × gate`, and PAXGUSDT receives `DEPOSIT × (1 − gate)`.
+3. Returns `null` if the computed cost is below one dollar (to avoid triggering the engine's default entry cost of $100).
+4. Otherwise opens a weekly bracket position with stop −50% / take-profit +500% and a `minuteEstimatedTime` of one week minus one minute.
+
+Yahoo Finance daily bars are fetched on demand — one HTTP request per ticker — and are not cached in Mongo. Redis holds signal state; Mongo holds the signal records.
+
+## Report Output
+
+When the run completes, the report is written to:
+
+```
+content/<month>/dump/report/backtest.jsonl
+```
+
+Each line in the file is a JSON object with an `action` field of `opened`, `active`, or `closed`. The `opened` row for each signal carries `gate`, `weight`, and `basketSize` in its `payload`; the `closed` row carries the realized `pnlCost` and `closeReason`. See [Reading Reports](/running/reading-reports) for a full breakdown of every field.
+
+## Process Exit
+
+After every symbol in the `symbolList` finishes its backtest the strategy calls `kill()`, which terminates the Node process via SIGKILL.
+
+<Note>
+  The process will exit with **code 137** (SIGKILL). This is intentional — the strategy calls `kill()` once the last `listenDoneBacktest` callback fires. The runner scripts treat any exit as success and move on to the next month. You do not need to handle or suppress this exit code manually.
+</Note>
+
+<Tip>
+  **Start with `sep_2020`.** It is the reference month the entire repo is stamped from, its basket is well-documented, and its report is the one checked in under `content/sep_2020/assets/backtest.jsonl`. Running it first confirms that your Docker services, Yahoo Finance access, and Node environment are all working before committing to a full 73-month replay.
+</Tip>

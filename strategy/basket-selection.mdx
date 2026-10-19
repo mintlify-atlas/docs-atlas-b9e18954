@@ -1,0 +1,120 @@
+---
+title: "Monthly Basket Selection: No-Survivorship Index Construction"
+sidebarTitle: "Basket Selection"
+description: "How each month's top-20 basket is built from prior-month Binance USDT volume with 90-day listing age, excluding stables, leveraged tokens, and wrapped assets."
+---
+
+Each month's basket is a snapshot of the market as it existed at the start of that month — ranked by facts that were already known, frozen as a constant, and never revised. This is what prevents survivorship bias: a coin that was liquid in 2021 and delisted in 2022 still appears in its 2021 month folders, and a memecoin that surged in 2024 is invisible to any month before it existed.
+
+## Ranking Criteria
+
+The basket for a given month is derived from the **previous calendar month's** Binance USDT spot quote volume, fetched in bulk via the ccxt `fetchOHLCV("1M", ...)` call inside `build_universe.mjs`. All active and delisted USDT pairs on Binance are included in the download, so the ranking reflects the actual liquidity landscape at that point in time rather than today's surviving symbols.
+
+The top-`N` pairs by quote volume of the prior month become the basket candidates, subject to the eligibility filters below.
+
+## Eligibility Filters
+
+Before a symbol is admitted to the basket, `build_universe.mjs` applies four independent exclusion rules:
+
+**1. Minimum listing age — 90 days**
+
+The date of a symbol's first monthly candle is used as a proxy for its listing date. A symbol is eligible only if:
+
+```
+monthStart − firstSeen[symbol] ≥ 90 × 86_400_000 ms
+```
+
+This prevents freshly listed coins from appearing in the basket purely on speculative volume.
+
+**2. Not a stablecoin or fiat base**
+
+The base asset is matched against a regex covering all major pegged assets and fiat currencies:
+
+```js
+const STABLE_OR_FIAT = /^(USDT|USDC|BUSD|TUSD|FDUSD|DAI|USDP|UST|USTC|
+  EUR|GBP|AUD|TRY|BRL|RUB|UAH|BIDR|NGN|ZAR|PLN|RON|ARS|MXN|COP|IDR|KZT|
+  AED|USD|JPY|USD1|XUSD|USDE|USDS|FRAX|LUSD|GUSD|USDD|PYUSD|EURI|AEUR|
+  SUSD|BKRW|VAI|BVND|PAX|USDSB|USDQ|RLUSD|USDY|BFUSD)$/;
+```
+
+**3. Not a leveraged token**
+
+Symbols whose base asset ends in `UP`, `DOWN`, `BULL`, or `BEAR` are excluded:
+
+```js
+const LEVERAGED = /(UP|DOWN|BULL|BEAR)$/;
+```
+
+**4. Not a wrapped or staked derivative**
+
+A set of known wrapped BTC, wrapped ETH, staked derivatives, and the parking symbol itself are excluded to avoid double-counting or circular exposure:
+
+```js
+const WRAPPED_OR_PARKING = /^(WBTC|WBETH|BETH|STETH|WSTETH|CBETH|RETH|
+  BNSOL|BBSOL|JITOSOL|MSOL|PAXG|XAUT|BTCST|BTCB|RENBTC|TBTC|SBTC|
+  WETH|ETHW|BNBX)$/;
+```
+
+**5. Valid Yahoo Finance ticker with sufficient history**
+
+Since candle data is sourced from Yahoo Finance, a symbol is only included if:
+
+- Its ticker exists in `scripts/common/yahoo_tickers.json` (resolved by `resolve_yahoo_tickers.mjs`) and is not `null`
+- Yahoo's price history for that ticker starts **at least 7 days before the month begins** (`YAHOO_HISTORY_MARGIN_DAYS = 7`)
+- The month is not listed in the ticker's `badMonths` field — months where Yahoo's closing prices diverged materially from Binance's (flagged by `verify_yahoo_tickers.mjs`)
+
+## The BASKET Constant
+
+The final ranked list is compiled into a TypeScript constant and written directly into `main.strategy.ts`. The September 2020 basket — ranking August 2020 volume — looks like this:
+
+```ts
+// BASKET:BEGIN
+// Сентябрь 2020: топ-20 USDT-пар спота Binance по обороту за август 2020 (известен до начала месяца),
+// листинг не моложе 90 дней, без стейблкоинов, плечевых токенов и обёрток BTC/ETH.
+// Сгенерировано scripts/common/generate_months.mjs из scripts/common/universe.json.
+const BASKET = [
+  "BTCUSDT",
+  "ETHUSDT",
+  "LINKUSDT",
+  "XRPUSDT",
+  "BNBUSDT",
+  "EOSUSDT",
+  "LTCUSDT",
+  "TRXUSDT",
+  "BCHUSDT",
+  "BANDUSDT",
+  "OMGUSDT",
+  "XTZUSDT",
+  "ADAUSDT",
+  "ATOMUSDT",
+  "VETUSDT",
+  "ZECUSDT",
+  "WAVESUSDT",
+  "QTUMUSDT",
+  "NEOUSDT",
+  "ALGOUSDT",
+];
+// BASKET:END
+```
+
+## The BASKET:BEGIN / BASKET:END Markers
+
+The block delimited by `// BASKET:BEGIN` and `// BASKET:END` is the **only** part of `main.strategy.ts` that changes between months. `generate_months.mjs` copies the reference folder (`content/sep_2020/`) into every other month and replaces only this block (plus the ticker overrides and the frame in the module). Everything else — the gate logic, the position structure, the deposit constant — is identical across all 73 month folders.
+
+This is a deliberate design choice: a refactor of any other part of the strategy must be made in the reference month and then re-stamped, never in individual month folders. Months that have already been run must not be retroactively altered.
+
+## No-Survivorship Guarantee
+
+Because each basket is a constant written before its month runs, the index cannot silently include coins that only exist or are only famous in hindsight. A coin that was delisted after October 2021 appears in all baskets up to that point and in none after. A memecoin launched in 2024 is not present in any 2021 or 2022 basket, even if it later became highly traded. The universe is built from Binance's historical order book, including pairs that are no longer active today.
+
+## The Parking Symbol
+
+`PAXGUSDT` — tokenized gold on Binance — is always appended to the symbol list after the basket is defined. It is not counted in `BASKET.length` and receives no share of the per-symbol equal-weight allocation. Instead it absorbs the portion of the deposit that the BTC trend gate keeps out of the crypto basket.
+
+```ts
+const PARKING_SYMBOL = "PAXGUSDT";
+```
+
+<Note>
+  The full symbol list the launcher uses is constructed as `SYMBOL_LIST = [...BASKET, PARKING_SYMBOL]`. This means the backtest engine runs 21 independent symbol simulations for a 20-coin basket month. The `listenDoneBacktest` counter increments once per symbol and calls `kill()` when it reaches `SYMBOL_LIST.length` — not `BASKET.length`. If `PARKING_SYMBOL` is omitted from this pattern, the process never terminates.
+</Note>

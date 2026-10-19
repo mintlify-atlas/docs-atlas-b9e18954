@@ -1,0 +1,122 @@
+---
+title: "Position Sizing, Allocation, and the Weekly Cycle"
+sidebarTitle: "Allocation & Cycle"
+description: "How the fund allocates a fixed deposit across basket symbols and PAXG using the trend gate, opens weekly bracket positions, and re-enters after time exit."
+---
+
+Every signal the strategy emits is a fixed-cost weekly position whose size is derived from two numbers: the gate value computed from Bitcoin's trend and the per-symbol equal weight derived from the deposit constant. The position lives exactly one week and closes by time; the next re-entry is the first tick after that close. There are no intraday exits under normal operation.
+
+## Allocation Formula
+
+The deposit is split equally across all basket symbols, then scaled by the gate:
+
+```ts
+const DEPOSIT_USD = 1000;
+const PARKING_SYMBOL = "PAXGUSDT";
+const PER_SYMBOL_USD = DEPOSIT_USD / BASKET.length;  // 1000 / 20 = $50 per basket symbol
+```
+
+Inside `getSignal`, the cost for each symbol is computed as:
+
+```ts
+const gate = await getGate();
+
+const cost = symbol === PARKING_SYMBOL
+  ? DEPOSIT_USD * (1 - gate)       // gold receives the un-gated fraction of the full deposit
+  : PER_SYMBOL_USD * gate;         // each basket symbol receives its equal share × gate
+
+// cost: 0 is silently replaced by the engine with CC_POSITION_ENTRY_COST (~$100),
+// so a zero exposure must be expressed as a missing signal, not a zero cost.
+if (cost < 1) {
+  return null;
+}
+```
+
+The `< 1` threshold catches both a gate of zero (basket symbols) and a gate of one (parking symbol) as well as any rounding that would produce a sub-dollar cost. Returning `null` tells the engine to produce no signal for this symbol on this tick.
+
+## Signal Structure
+
+When the cost clears the threshold, the full signal object is:
+
+```ts
+return {
+  id: `${symbol.toLowerCase()}-${when.toISOString().slice(0, 10)}`,
+  symbol,
+  ...Position.bracket({
+    position: "long",
+    currentPrice,
+    percentStopLoss: STOP_LOSS_PERCENT,    // 50  — technically unreachable in one week on spot
+    percentTakeProfit: TAKE_PROFIT_PERCENT, // 500 — technically unreachable in one week on spot
+  }),
+  cost: Math.round(cost * 100) / 100,
+  minuteEstimatedTime: HOLD_MINUTES,        // 7 * 24 * 60 - 1 = 10079 minutes
+  payload: { gate, weight: cost / DEPOSIT_USD, basketSize: BASKET.length },
+  note: `${symbol} gate=${gate.toFixed(2)} cost=$${cost.toFixed(2)}`,
+};
+```
+
+Each field serves a specific purpose:
+
+| Field | Value | Purpose |
+|-------|-------|---------|
+| `id` | `"btcusdt-2020-09-01"` | Unique signal key; prevents duplicate entries within the same day |
+| `symbol` | e.g. `"BTCUSDT"` | Binance pair the engine will simulate |
+| `percentStopLoss` | `50` | Technical only — a 50 % spot drop in one week is not a normal exit path |
+| `percentTakeProfit` | `500` | Technical only — a 500 % spot gain in one week is not a normal exit path |
+| `cost` | rounded to 2 dp | Dollar amount allocated to this position this week |
+| `minuteEstimatedTime` | `10079` | Seven days minus one minute: closes at 23:59 |
+| `payload.gate` | 0–1 | Gate value at signal creation; visible in every report row |
+| `payload.weight` | `cost / 1000` | Fractional share of total deposit; sums to 1 across all symbols when gate is 1 |
+| `payload.basketSize` | `20` | Basket size at the time of the signal; constant within a month |
+| `note` | human-readable | Visible in the engine UI for quick inspection |
+
+## The Weekly Cycle
+
+<Steps>
+
+### Position opens on the first daily tick of the week
+
+`addStrategySchema` uses `interval: "1h"`, so the engine evaluates the strategy once per hour (at the daily step boundary, given `CC_BACKTEST_STEP_MINUTES: 24 * 60`). On each evaluation, if the symbol has no open position, a new signal is returned.
+
+### Position closes at 23:59 via `time_expired`
+
+`minuteEstimatedTime: 10079` means the position's estimated close time is exactly 7 days minus 1 minute from when it was opened. The engine closes the position with `closeReason: "time_expired"` at that point.
+
+### Re-entry on the 00:00 tick of the following day
+
+The one-minute gap between 23:59 (close) and 00:00 (next hourly tick) ensures the engine evaluates the re-entry signal before the next day's daily bar is consumed. The new signal uses the gate computed from that day's Bitcoin close — so the position size for the new week can differ from the prior week.
+
+### Stop and take-profit remain untouched
+
+The `−50 %` stop and `+500 %` take-profit are present only to satisfy the engine's position validator, which requires bracket levels. On a weekly spot position these levels are operationally unreachable. Any signal that closes with a reason other than `time_expired` should be treated as a data anomaly and investigated.
+
+</Steps>
+
+## Leg Desynchronisation
+
+The gold leg (`PAXGUSDT`) and the basket legs are independent backtests. Each one opens and re-enters on its own weekly cycle. If the gate changes in the middle of a week — for example, moving from `3/6` to `4/6` on Wednesday — the basket legs will not see that change until their current position closes next Sunday, and similarly for gold. After the first week in which the gate changes, the two legs may close on different days and their cycles drift apart.
+
+This is a documented approximation. The HOWTO describes it as a known gap and notes two ways to eliminate it (synchronised re-entry via a shared signal, or a portfolio-level engine). The repository ships the simpler version intentionally: the arithmetic is transparent, and the approximation is small relative to weekly holding periods.
+
+## Shutdown: `listenDoneBacktest`
+
+The engine does not know when a multi-symbol backtest has finished — it runs each symbol to the end of the frame independently. The strategy uses `listenDoneBacktest` to count completions and call `kill()` after the last symbol:
+
+```ts
+declare var kill: any;
+
+let doneCount = 0;
+
+listenDoneBacktest(() => {
+  doneCount += 1;
+  if (doneCount >= SYMBOL_LIST.length) {
+    kill();
+  }
+});
+```
+
+`SYMBOL_LIST.length` is `BASKET.length + 1` (the `+1` is `PARKING_SYMBOL`). The counter must reach 21 for a 20-coin basket month before the process exits.
+
+<Note>
+  The fund's aggregate PnL for a month is not computed by the engine — the engine has no shared portfolio balance. Each symbol runs an independent backtest against its own fixed `DEPOSIT_USD`. The "fund" result is the arithmetic sum of `pnlCost` across all signal rows in the month's `backtest.jsonl` report. The `summarize_reports.mjs` script performs this aggregation across all months and calculates the cumulative P&L and drawdown.
+</Note>

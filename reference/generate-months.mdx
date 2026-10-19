@@ -1,0 +1,74 @@
+---
+title: "generate_months.mjs — Stamp Month Folders from Reference"
+sidebarTitle: "generate_months"
+description: "Reference for generate_months.mjs: stamps all content/<month>/ folders from the reference month by substituting basket, ticker overrides, and frame per month."
+---
+
+`generate_months.mjs` reads `scripts/common/universe.json` and produces a self-contained `content/<mon>_<yyyy>/` folder for every month in the universe by copying the reference month's files and substituting the three things that differ between months: the basket block, the Yahoo ticker overrides, and the backtest frame. It also rewrites the Linux and Windows runner scripts so they always list every generated month in chronological order.
+
+## Usage
+
+```bash
+node scripts/common/generate_months.mjs [--source content/sep_2020]
+```
+
+## Flags
+
+<ParamField path="--source" type="string" default="content/sep_2020">
+  Path to the reference month folder (relative to the repository root). The strategy logic, candle fetcher classes, and exchange module from this folder are used as the template for all generated months.
+</ParamField>
+
+## Prerequisites
+
+Before running this script:
+
+- `scripts/common/universe.json` must exist (produced by `build_universe.mjs`).
+- Every symbol in every basket must have a verified, non-null entry in `scripts/common/yahoo_tickers.json`. If any symbol is missing or null, the script throws immediately.
+- The reference `main.strategy.ts` must contain a `// BASKET:BEGIN … // BASKET:END` marker block.
+- The reference `modules/backtest.module.ts` must contain a `const TICKER_OVERRIDES: Record<string, string> = { … };` block.
+
+## What Gets Substituted Per Month
+
+The generator makes exactly three substitutions inside the copied source files:
+
+1. **`BASKET:BEGIN … BASKET:END` block** in `main.strategy.ts` — replaced with the array of Binance symbols for that month (`BTCUSDT`, `ETHUSDT`, …), along with a comment recording which prior month's volume was used for ranking and the basket size.
+
+2. **`const TICKER_OVERRIDES` block** in `modules/backtest.module.ts` — replaced with the non-default Yahoo ticker mappings for the coins in that month's basket. Only tickers that differ from the plain `BASE-USD` pattern appear here (e.g. `RNDRUSDT: "RENDER-USD"`). `PAXGUSDT` is always included in the override check.
+
+3. **Frame fields** in `modules/backtest.module.ts` — four values are rewritten:
+   - `frameName` → `"<mon>_<yyyy>_frame"` (e.g. `"sep_2020_frame"`)
+   - `startDate` → `new Date("YYYY-MM-01T00:00:00Z")`
+   - `endDate` → `new Date("YYYY-MM-<lastDay>T23:59:59Z")`
+   - `note` → `"<MonthName> <Year>"` (e.g. `"September 2020"`)
+
+## What Is Copied Unchanged
+
+- All files in the `classes/` subdirectory of the reference folder (including `YahooFinance.ts` and any other utilities).
+- The remainder of `main.strategy.ts` outside the `BASKET:BEGIN … BASKET:END` block — gate logic, allocation, position entry, and `setConfig` calls are identical across all months.
+- The remainder of `modules/backtest.module.ts` outside the three substituted regions — exchange schema, adapter setup, and other module registrations are preserved as-is.
+
+## Runner Scripts Rewritten
+
+After generating all month folders the script overwrites:
+
+- `scripts/linux/generate_strategy.sh` — a Bash script that runs the backtest CLI for every generated month in chronological order.
+- `scripts/win/generate_strategy.bat` — the equivalent Windows batch file.
+
+Both scripts list every month explicitly; running `generate_months.mjs` again always produces a correct and complete list even if months were added or removed.
+
+## Failure Modes
+
+The script throws a descriptive error and exits immediately if any of the following conditions are met:
+
+- The `// BASKET:BEGIN … // BASKET:END` marker block is absent from the reference `main.strategy.ts`.
+- The `const TICKER_OVERRIDES` block is absent from the reference `modules/backtest.module.ts`.
+- Any symbol in a basket has a `null` Yahoo ticker entry (coin excluded from Yahoo).
+- Any symbol in a basket has no entry at all in `yahoo_tickers.json` (coin not yet checked by the resolver).
+
+<Warning>
+  Running this script overwrites every existing `content/<month>/` folder. Any manual edits made directly inside generated month folders — including fixes to the strategy logic, custom frame adjustments, or hand-patched ticker overrides — will be lost. All intentional changes to strategy behavior must be made in the reference month folder (`content/sep_2020` by default) before regenerating.
+</Warning>
+
+<Tip>
+  If the basket data in `universe.json` is already current and you only changed the strategy logic inside the reference month, you can run `generate_months.mjs` directly without going through the universe rebuild and resolver loop. The script reads basket and ticker data from the existing JSON files and does not contact Binance or Yahoo Finance.
+</Tip>
