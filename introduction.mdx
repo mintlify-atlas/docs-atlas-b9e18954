@@ -1,7 +1,7 @@
 ---
 title: "Backtest Index Fund: No-Survivorship Crypto Backtesting"
 sidebarTitle: "Introduction"
-description: "Backtest Index Fund is a TypeScript template for replaying a weekly crypto index fund month by month using real Binance volume rankings and Yahoo Finance data."
+description: "Backtest Index Fund replays a weekly crypto index fund month by month using Binance volume rankings and Yahoo Finance data without survivorship bias."
 ---
 
 Most "crypto index" ideas die on two details that are easy to hand-wave in a spreadsheet and impossible to hand-wave in an engine: which coins were actually in the index on a given month (not the ones that survived until today), and what happens to the money when the index is not worth holding. This repo answers both mechanically. The basket of each month is frozen into that month's folder from data that was known before the month started, and the deposit never sits idle — the trend gate moves it between the alt basket and gold, week by week, with the whole decision visible in every signal's `payload`.
@@ -63,7 +63,7 @@ The repository is a complete, runnable template:
   <Card title="How It Works" icon="gears" href="/how-it-works">
     A complete walkthrough of the fund mechanics: basket selection, BTC trend gate, PAXG allocation, and the weekly position cycle.
   </Card>
-  <Card title="Strategy Reference" icon="code" href="/strategy">
+  <Card title="Strategy Reference" icon="code" href="/reference/main-strategy">
     Annotated source of `main.strategy.ts`: constants, gate calculation, signal return, and the launcher schema.
   </Card>
 </CardGroup>

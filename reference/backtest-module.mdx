@@ -1,7 +1,7 @@
 ---
 title: "backtest.module.ts — Exchange Adapter and Month Frame"
 sidebarTitle: "backtest.module.ts"
-description: "Reference for backtest.module.ts: registers the Yahoo Finance exchange adapter, defines the Binance-to-Yahoo ticker map, and sets the month's backtest frame."
+description: "Reference for backtest.module.ts: registers the Yahoo Finance exchange adapter, defines the Binance-to-Yahoo ticker map, and sets the month backtest frame."
 ---
 
 `backtest.module.ts` is the infrastructure half of a month folder. It registers three schemas with the backtest-kit engine — the exchange adapter, the backtest frame, and the ticker map that bridges Binance symbol names to Yahoo Finance ticker strings. The strategy file (`main.strategy.ts`) handles fund logic and engine configuration; this module handles data routing and time-window setup only.

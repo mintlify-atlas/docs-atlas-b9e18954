@@ -1,5 +1,5 @@
 ---
-title: "How the Weekly Crypto Index Fund Works"
+title: "How Backtest Index Fund Weekly Crypto Strategy Works"
 sidebarTitle: "How It Works"
 description: "A complete walkthrough of the fund mechanics: monthly basket selection, BTC six-window trend gate, PAXG allocation, and the weekly position cycle."
 ---
@@ -61,7 +61,7 @@ The strategy is one file per month — `main.strategy.ts` — reading top to bot
   gate = count({ N ∈ {20,25,30,35,40,45} | close(yesterday) > close(yesterday − N days) }) / 6
   ```
 
-  Possible values are 0, ⅙, ⅔, ½, ⅔, ⅚, and 1. Using an ensemble instead of a single moving average removes a knife-edge parameter: single lookbacks outside the 25–45 day range perform noticeably worse, but within that plateau the result is insensitive to which N is chosen. The ensemble averages over the plateau rather than picking a point on it.
+  Possible values are 0, ⅙, ⅓, ½, ⅔, ⅚, and 1. Using an ensemble instead of a single moving average removes a knife-edge parameter: single lookbacks outside the 25–45 day range perform noticeably worse, but within that plateau the result is insensitive to which N is chosen. The ensemble averages over the plateau rather than picking a point on it.
 
   The gate is cached once per day with `Cache.fn` and a `1d` interval. Because `getCandles` is trimmed to the engine's current backtest time, there is no look-ahead even during simulation.
 

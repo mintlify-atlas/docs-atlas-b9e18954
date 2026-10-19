@@ -42,9 +42,9 @@ The header of `main.strategy.ts` declares all fund parameters as named constants
 <ParamField path="STOP_LOSS_PERCENT" type="number" default="50">
   Technical stop-loss distance as a percentage below entry. At −50 % on a spot
   position with no leverage, this level is not reachable within a week; the
-  normal exit path is `time_expired`. The value must exceed
-  `CC_MAX_STOPLOSS_DISTANCE_PERCENT` (set to `100`) so the engine validator
-  accepts it.
+  normal exit path is `time_expired`. `STOP_LOSS_PERCENT` must not exceed
+  `CC_MAX_STOPLOSS_DISTANCE_PERCENT` (raised to `100`) for the engine validator
+  to accept it.
 </ParamField>
 
 <ParamField path="TAKE_PROFIT_PERCENT" type="number" default="500">

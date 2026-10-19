@@ -1,7 +1,7 @@
 ---
 title: "Yahoo Finance Daily Bars in a Minute-Resolution Engine"
 sidebarTitle: "Data Pipeline"
-description: "How Yahoo Finance daily bars are fetched without an API key, sampled into minute candles via getCandlesSampled, and the trade-offs this creates for backtesting."
+description: "How Yahoo Finance daily bars are fetched without an API key, sampled to minutes via getCandlesSampled, and the trade-offs this creates for backtesting."
 ---
 
 backtest-kit simulates positions against a stream of OHLCV candles, and by default it expects minute-resolution data. Yahoo Finance's chart API only provides daily bars for most assets. The data pipeline bridges these two realities with a chain of adapters: a memoised HTTP fetcher, a candle sampler that repeats each daily bar across its constituent minutes, and a gap-repair pass that handles weekends, holidays, and malformed bars. A single configuration switch then tells the engine to step once per day, collapsing the 1440 identical minute bars into a single evaluation.
@@ -36,7 +36,13 @@ private fetchAll = memoize(
 );
 ```
 
-After a successful fetch, timestamps are normalised to midnight UTC (Yahoo reports session-open times in the exchange's local timezone). `null` values in any of the four OHLC fields cause the bar to be silently dropped before the array is returned — gap-repair in `getCandlesFilled` handles the resulting holes.
+After a successful fetch, timestamps are normalised to midnight UTC. Yahoo reports each bar's timestamp as the session-open time in the exchange's local timezone (Unix seconds); the conversion snaps it to the calendar day boundary with a 12-hour offset to ensure the correct UTC date regardless of the session's timezone:
+
+```ts
+const day = Math.floor((t * 1000 + 12 * 3600_000) / DAY_MS) * DAY_MS;
+```
+
+`null` values in any of the four OHLC fields cause the bar to be silently dropped before the array is returned — gap-repair in `getCandlesFilled` handles the resulting holes.
 
 The `getCandles` method slices the memoised full history by `since` and `limit`:
 

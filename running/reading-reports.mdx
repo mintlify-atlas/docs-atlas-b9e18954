@@ -92,7 +92,7 @@ month    opened closed  net$     net%   fees$  gross%  PAXG$  gate      non-time
 | `closed` | Number of `closed` rows — should equal `opened`; a mismatch means the run was interrupted |
 | `net$` | Net realized P&L for the month in USD (sum of all `pnlCost` values) |
 | `net%` | `net$ / DEPOSIT_USD × 100` — P&L as a percentage of the fixed deposit |
-| `fees$` | Estimated round-trip cost: `cost × 0.4% × 2 sides` (0.1% fee + 0.1% slippage per side, engine defaults) — note that `pnlCost` in the report is already net of these costs |
+| `fees$` | Estimated round-trip cost: `cost × 0.4%` — (0.1% fee + 0.1% slippage) × 2 sides = 0.4% total = factor `0.004` (engine defaults) — note that `pnlCost` in the report is already net of these costs |
 | `gross%` | `(net$ + fees$) / DEPOSIT_USD × 100` — P&L before estimated fees |
 | `PAXG$` | Gold leg contribution — net P&L from `PAXGUSDT` positions only |
 | `gate` range | `min..max` gate value observed across all `opened` rows for non-PAXG symbols during the month |

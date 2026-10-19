@@ -51,7 +51,7 @@ The script applies the following filters before ranking. Any symbol that fails a
 - **90-day minimum listing age** — `monthStart − firstSeen[symbol] >= 90 days`. Prevents very new listings from entering the basket before they have meaningful liquidity history.
 - **Stablecoins and fiat bases excluded** — symbols whose base matches a hard-coded set including `USDT`, `USDC`, `BUSD`, `FDUSD`, `DAI`, `EUR`, `GBP`, `TRY`, and many others are dropped.
 - **Leveraged tokens excluded** — symbols whose base ends in `UP`, `DOWN`, `BULL`, or `BEAR` are removed.
-- **Wrapped and staked derivatives excluded** — a fixed set including `WBTC`, `BETH`, `STETH`, `WSTETH`, `CBETH`, `RETH`, `BNSOL`, `BBSOL`, `JITOSOL`, `MSOL`, `PAXG`, `XAUT`, `WETH`, and similar tokens is blocked regardless of volume.
+- **Wrapped and staked derivatives excluded** — a fixed set of `WBTC`, `WBETH`, `BETH`, `STETH`, `WSTETH`, `CBETH`, `RETH`, `BNSOL`, `BBSOL`, `JITOSOL`, `MSOL`, `PAXG`, `XAUT`, `BTCST`, `BTCB`, `RENBTC`, `TBTC`, `SBTC`, `WETH`, `ETHW`, and `BNBX` is blocked regardless of volume.
 - **No Yahoo ticker** — coins with a `null` entry in `yahoo_tickers.json` are excluded. Coins not yet present in the file are treated as unresolved (see exit code 2).
 - **Yahoo history starts too late** — if the Yahoo ticker's `since` date is less than 7 days before the start of the month, the coin is excluded for that month only.
 - **`badMonths` entries** — coins whose `yahoo_tickers.json` entry contains a `badMonths` array are excluded for the specific months listed there (set by `verify_yahoo_tickers.mjs`).
